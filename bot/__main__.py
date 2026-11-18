@@ -31,6 +31,7 @@ GROUP_COMMANDS = [
     BotCommand(command="new", description="[адмін] Нова черга"),
     BotCommand(command="go", description="[адмін] Почати приймати"),
     BotCommand(command="skip", description="[адмін] Поточний не прийшов"),
+    BotCommand(command="wait", description="[адмін] Скільки хвилин чекати на «Йду»"),
     BotCommand(command="repost", description="[адмін] Переслати чергу вниз"),
     BotCommand(command="close", description="[адмін] Закрити чергу"),
 ]
@@ -64,9 +65,12 @@ async def main() -> None:
         scope=BotCommandScopeAllPrivateChats(),
     )
 
+    # Автопропуски, які «тікали» до перезапуску (мінімум хвилина на «Йду»).
+    service.start_timers(min_delay=60)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        service.stop_timers()
         await service.wait_background()
         await storage.close()
         await bot.session.close()

@@ -126,6 +126,7 @@ async def env(tmp_path):
     e = Env()
     e.session, e.service, e.storage, e.send, e.press = session, service, storage, send, press
     yield e
+    service.stop_timers()
     await storage.close()
 
 
@@ -177,7 +178,7 @@ async def test_full_lab_session(env):
 
     # Андрій натискає кнопку — черга закінчилась.
     await env.press(ANDRII, f"q:done:{queue.id}", queue.message_id)
-    assert "Усі записані здали" in env.session.texts()[-1]
+    assert "Більше нікого" in env.session.texts()[-1]
 
     # Закриття.
     await env.send(ADMIN, "/close")
@@ -207,3 +208,49 @@ async def test_name_command_renames_in_queue(env):
     assert queue.find_user(OLENA.id).name == "Коваленко Олена"
     edits = env.session.sent(EditMessageText)
     assert "Коваленко Олена" in edits[-1].text
+
+
+async def test_no_show_flow(env, monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("bot.queue_logic.now", lambda: clock["t"])
+    marta = User(id=4, is_bot=False, first_name="Марта")
+
+    await env.send(ADMIN, "/new Лаба 10:00-10:30 чекати 2")
+    queue = env.storage.get((CHAT_ID, 0))
+    assert queue.wait_minutes == 2
+    for user in (OLENA, ANDRII, marta):
+        await env.send(user, "/join")
+    await env.send(ADMIN, "/go")
+    assert "протягом 2 хв" in env.session.texts()[-1]
+
+    # Андрій (наступний) намагається пропустити Олену одразу — зарано.
+    await env.press(ANDRII, f"q:absent:{queue.id}", queue.message_id)
+    assert "ще" in last_answer(env.session).text
+
+    # Минула хвилина — тепер можна.
+    clock["t"] += 60
+    await env.press(ANDRII, f"q:absent:{queue.id}", queue.message_id)
+    text = env.session.texts()[-1]
+    assert text.startswith("⏭ ") and f"id={OLENA.id}" in text
+    assert f"id={ANDRII.id}" in text and "твоя черга" in text
+
+    # Андрій підтверджує — автопропуск його не чіпає.
+    await env.press(ANDRII, f"q:coming:{queue.id}", queue.message_id)
+    assert queue.current.confirmed
+    assert (CHAT_ID, 0) not in env.service._timers
+
+    # Олена прибігає: 1-й пропуск → пропускає вперед Марту.
+    await env.send(OLENA, "/here")
+    await env.send(ANDRII, "/done")
+    assert queue.current.user_id == marta.id
+    assert queue.upcoming.user_id == OLENA.id
+
+    # Марта не натискає «Йду» 2 хвилини — бот пропускає її сам.
+    # (start_timers — те саме, що робить бот після перезапуску.)
+    clock["t"] += 121
+    env.service.start_timers()
+    await env.service._timers[(CHAT_ID, 0)]  # таймер одразу бачить, що час вийшов
+    await env.service.wait_background()
+    text = env.session.texts()[-1]
+    assert text.startswith("⏭ ") and f"id={marta.id}" in text
+    assert queue.current.user_id == OLENA.id

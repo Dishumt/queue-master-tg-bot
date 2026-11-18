@@ -1,6 +1,6 @@
 from bot.parsing import parse_new_args
 from bot.queue_logic import Queue, Slot
-from bot.render import mention, parse_callback, queue_keyboard, render_queue
+from bot.render import mention, parse_callback, queue_keyboard, render_queue, render_turn
 
 
 def make_queue() -> Queue:
@@ -20,11 +20,28 @@ def test_render_running_queue():
     assert "Лаба &lt;3&gt;" in text  # HTML екранується
     assert "здали 1 з 3" in text
     assert "✅ Олена" in text
-    assert "▶️ <b>Андрій</b>" in text
+    assert "📣 <b>Андрій</b>" in text  # покликали, ще не підтвердив
     assert "⏳ Марія" in text
     assert "перерва" in text
     # перерва стоїть між 10:05 і 10:20
     assert text.index("10:05") < text.index("перерва") < text.index("10:20")
+
+    q.confirm(2)
+    assert "▶️ <b>Андрій</b>  ← здає" in render_queue(q)
+
+
+def test_returned_person_out_of_time_order_has_no_fake_break():
+    times = parse_new_args("X 10:00-10:30 5").slot_times()
+    q = Queue(chat_id=1, thread_id=0, title="X", step=5, slots=[Slot(t) for t in times])
+    for uid in (1, 2, 3, 4):
+        q.join(uid, f"U{uid}")
+    q.start()
+    q.skip()
+    q.here(1)  # 10:05 U2 | 10:10 U3 | 10:00 U1 | 10:15 U4
+    text = render_queue(q)
+    assert "перерва" not in text
+    assert "↩️" in text
+    assert text.index("U3") < text.index("U1") < text.index("U4")
 
 
 def test_render_long_queue_fits_telegram_limit():
@@ -44,10 +61,33 @@ def test_keyboard_and_callback_roundtrip():
     q = make_queue()
     kb = queue_keyboard(q)
     datas = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert datas == ["q:join:7", "q:leave:7", "q:done:7", "q:later:7"]
+    assert datas == ["q:join:7", "q:leave:7"]  # до старту — тільки запис
+    q.join(1, "A")
+    q.start()
+    datas = [b.callback_data for row in queue_keyboard(q).inline_keyboard for b in row]
+    assert datas == ["q:join:7", "q:leave:7", "q:coming:7", "q:done:7", "q:later:7", "q:absent:7"]
     assert parse_callback("q:done:7") == ("done", 7)
     assert parse_callback("q:hack:7") is None
     assert parse_callback("q:done:x") is None
     assert parse_callback(None) is None
     q.close()
     assert queue_keyboard(q) is None
+
+
+def test_render_turn_messages():
+    q = make_queue()
+    q.join(1, "Олена")
+    q.join(2, "Андрій")
+    q.start()
+    text = render_turn(q, q.pop_turn_change())
+    assert "Олена</a>, твоя черга" in text
+    assert "протягом 3 хв" in text
+    assert "Андрій</a>, готуйся" in text
+
+    q.skip()
+    text = render_turn(q, q.pop_turn_change())
+    assert text.startswith("⏭ ") and "/here" in text
+    assert "Андрій</a>, твоя черга" in text
+
+    q.finish(2, is_admin=False)
+    assert "Більше нікого" in render_turn(q, q.pop_turn_change())

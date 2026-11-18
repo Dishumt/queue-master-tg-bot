@@ -7,10 +7,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from bot.handlers.helpers import key_of, ok, require_admin
-from bot.parsing import NEW_USAGE, clean_name, normalize_time, parse_new_args
+from bot.parsing import NEW_USAGE, clean_name, normalize_time, parse_new_args, parse_wait
 from bot.permissions import AdminCache
 from bot.queue_logic import Queue, QueueError, Slot
-from bot.render import mention
 from bot.service import QueueService
 
 router = Router(name="admin")
@@ -29,6 +28,7 @@ async def cmd_new(message: Message, command: CommandObject, service: QueueServic
         thread_id=thread_id,
         title=args.title,
         step=args.step,
+        wait_minutes=args.wait,
         slots=[Slot(t) for t in args.slot_times()],
     )
     await service.create(queue, created_by=message.from_user.id if message.from_user else 0)
@@ -44,8 +44,22 @@ async def cmd_go(message: Message, service: QueueService, admins: AdminCache):
 @router.message(Command("skip"))
 async def cmd_skip(message: Message, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
-    slot = await service.apply(key_of(message), lambda q: q.skip())
-    await message.answer(f"⏭ {mention(slot)} пропущено. Якщо прийде — хай напише /here")
+    await service.apply(key_of(message), lambda q: q.skip())
+    # Повідомлення «пропущено + наступний» надішле сервіс.
+
+
+@router.message(Command("wait"))
+async def cmd_wait(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
+    await require_admin(message, admins)
+    if not command.args:
+        queue = service.get(key_of(message))
+        raise QueueError(
+            f"Зараз чекаю на «🏃 Йду» {queue.wait_minutes} хв.\n"
+            "Змінити: /wait 5 (0 — вимкнути автопропуск)"
+        )
+    minutes = parse_wait(command.args)
+    await service.apply(key_of(message), lambda q: q.set_wait(minutes))
+    await ok(message)
 
 
 @router.message(Command("add"))

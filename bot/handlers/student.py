@@ -57,9 +57,19 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
         case "leave":
             slot = await service.apply(key, lambda q: q.leave(user.id), queue_id)
             await cb.answer(f"🚪 Слот {slot.time} звільнено")
+        case "coming":
+            await service.apply(key, lambda q: q.confirm(user.id), queue_id)
+            await cb.answer("🏃 Окей, чекаємо тебе!")
         case "done":
             await _finish(service, admins, key, cb, user, queue_id)
             await cb.answer("✅ Записав, що здав. Молодець!")
+        case "absent":
+            # Адмінів питаємо тільки якщо натиснув не наступний у черзі.
+            queue = service.get(key, queue_id)
+            is_next = queue.upcoming is not None and queue.upcoming.user_id == user.id
+            is_admin = False if is_next else await admins.is_admin(cb)
+            slot = await service.apply(key, lambda q: q.absent(user.id, is_admin), queue_id)
+            await cb.answer(f"⏭ {slot.name} пропущено")
         case "later":
             mine, _ = await service.apply(key, lambda q: q.later(user.id), queue_id)
             await cb.answer(f"⏬ Тепер ти на {mine.time}")

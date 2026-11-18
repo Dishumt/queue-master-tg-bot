@@ -19,10 +19,9 @@ from typing import Any, TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
+from bot import queue_logic
 from bot.queue_logic import Queue, QueueError, QueueStatus, TurnChange
-from bot.render import CB_PREFIX, mention, queue_keyboard, render_queue
+from bot.render import queue_keyboard, render_queue, render_turn, turn_keyboard
 from bot.storage import QueueKey, Storage
 
 log = logging.getLogger(__name__)
@@ -42,6 +41,9 @@ class QueueService:
         self._refreshers: dict[QueueKey, asyncio.Task[None]] = {}
         self._announce_locks: dict[QueueKey, asyncio.Lock] = {}
         self._background: set[asyncio.Task[Any]] = set()
+        # Таймери автопропуску — окремо від _background, бо вони довгі
+        # (хвилини), і на них не треба чекати при зупинці.
+        self._timers: dict[QueueKey, asyncio.Task[None]] = {}
         self.refresh_interval = REFRESH_INTERVAL
 
     # ------------------------------------------------------------------
@@ -66,7 +68,57 @@ class QueueService:
         self.refresh(queue)
         if change is not None:
             self._announce(queue, change)
+        self._schedule_timer(queue)
         return result
+
+    # ------------------------------------------------------------------
+    # Таймер автопропуску
+    # ------------------------------------------------------------------
+
+    def _schedule_timer(self, queue: Queue, min_delay: float = 0.0) -> None:
+        """Перезапустити таймер «не натиснув Йду» під поточний стан черги.
+
+        Викликається після кожної дії: якщо поточний змінився або підтвердив —
+        старий таймер скасовується, а новий ставиться тільки коли треба.
+        """
+        key = (queue.chat_id, queue.thread_id)
+        old = self._timers.pop(key, None)
+        if old is not None:
+            old.cancel()
+        deadline = queue.confirm_deadline
+        if deadline is not None:
+            self._timers[key] = asyncio.create_task(
+                self._timer(key, queue.id, deadline, min_delay)
+            )
+
+    async def _timer(
+        self, key: QueueKey, queue_id: int | None, deadline: float, min_delay: float
+    ) -> None:
+        await asyncio.sleep(max(min_delay, deadline - queue_logic.now()))
+        # Прибираємо себе зі списку ДО apply: apply поставить новий таймер
+        # і не повинен скасувати цю задачу посеред роботи.
+        if self._timers.get(key) is asyncio.current_task():
+            del self._timers[key]
+        try:
+            await self.apply(key, lambda q: q.expire(), queue_id)
+        except QueueError:
+            pass  # черга закрилась, поки ми чекали
+        except Exception:
+            log.exception("Помилка автопропуску в черзі %s", queue_id)
+
+    def start_timers(self, min_delay: float = 0.0) -> None:
+        """Після перезапуску бота — відновити таймери всіх активних черг.
+
+        min_delay — мінімальна пауза перед автопропуском. Поки бот лежав,
+        натиснути «Йду» було неможливо, тож при старті даємо людині ще шанс.
+        """
+        for queue in self.storage.all():
+            self._schedule_timer(queue, min_delay)
+
+    def stop_timers(self) -> None:
+        for task in self._timers.values():
+            task.cancel()
+        self._timers.clear()
 
     # ------------------------------------------------------------------
     # Нова черга / перепублікація
@@ -167,27 +219,10 @@ class QueueService:
 
     def _announce(self, queue: Queue, change: TurnChange) -> None:
         # Текст складаємо одразу (синхронно), поки стан черги саме такий.
-        if change.current is None:
-            if queue.status is not QueueStatus.RUNNING:
-                return
-            text = "🎉 Усі записані здали! Можна дописатися — бот покличе."
-            keyboard = None
-        else:
-            text = f"▶️ {mention(change.current)}, твоя черга! ({change.current.time})"
-            if change.upcoming is not None:
-                text += f"\n⏳ {mention(change.upcoming)}, готуйся — ти наступний."
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="✅ Я закінчив", callback_data=f"{CB_PREFIX}:done:{queue.id}"
-                        ),
-                        InlineKeyboardButton(
-                            text="⏬ Пізніше", callback_data=f"{CB_PREFIX}:later:{queue.id}"
-                        ),
-                    ]
-                ]
-            )
+        text = render_turn(queue, change)
+        if text is None:
+            return
+        keyboard = turn_keyboard(queue) if change.current is not None else None
         key = (queue.chat_id, queue.thread_id)
         lock = self._announce_locks.setdefault(key, asyncio.Lock())
 
