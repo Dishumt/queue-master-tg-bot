@@ -13,7 +13,7 @@ async def test_queue_survives_restart(tmp_path):
     q.join(2, "B")
     q.start()
     q.message_id = 777
-    q.pop_new_current()
+    q.pop_turn_change()
     await storage.save(q)
     await storage.set_name(1, "Петрашкевич Артем")
     await storage.close()
@@ -27,7 +27,7 @@ async def test_queue_survives_restart(tmp_path):
     assert loaded.current.name == "A"
     assert loaded.upcoming.name == "B"
     # Поточного вже тегали до перезапуску — повторно не тегаємо.
-    assert loaded.pop_new_current() is None
+    assert loaded.pop_turn_change() is None
     assert storage.get_name(1) == "Петрашкевич Артем"
     await storage.close()
 

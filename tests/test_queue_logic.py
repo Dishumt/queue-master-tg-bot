@@ -266,17 +266,23 @@ def test_closed_queue_rejects_everything():
 # ---------------------------------------------------------------- кого тегати
 
 
-def test_pop_new_current_reports_each_change_once():
+def test_pop_turn_change_reports_each_change_once():
     q = make_queue()
     q.join(1, "A")
     q.join(2, "B")
-    assert q.pop_new_current() is None  # ще не запущено
+    assert q.pop_turn_change() is None  # ще не запущено
     q.start()
-    assert q.pop_new_current().name == "A"
-    assert q.pop_new_current() is None  # вдруге — вже не новий
+    change = q.pop_turn_change()
+    assert change.current.name == "A"
+    assert change.upcoming.name == "B"
+    assert q.pop_turn_change() is None  # вдруге — вже не новий
     q.later(1)  # той самий слот, але інша людина
-    assert q.pop_new_current().name == "B"
+    assert q.pop_turn_change().current.name == "B"
     q.finish(2, is_admin=False)
-    assert q.pop_new_current().name == "A"
+    change = q.pop_turn_change()
+    assert change.current.name == "A"
+    assert change.upcoming is None
     q.finish(1, is_admin=False)
-    assert q.pop_new_current() is None
+    change = q.pop_turn_change()
+    assert change is not None and change.current is None  # черга скінчилась
+    assert q.pop_turn_change() is None

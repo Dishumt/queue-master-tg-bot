@@ -115,7 +115,7 @@ class Storage:
                 message_id=message_id,
                 id=qid,
             )
-            queue.pop_new_current()  # поточного вже кликали до перезапуску
+            queue.pop_turn_change()  # поточного вже кликали до перезапуску
             self._queues[(chat_id, thread_id)] = queue  # новіша перезапише старішу
 
         async with self.db.execute("SELECT user_id, name FROM users") as cur:

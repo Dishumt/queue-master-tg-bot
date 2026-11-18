@@ -55,6 +55,12 @@ class Slot:
         self.status = SlotStatus.EMPTY
 
 
+@dataclass(frozen=True)
+class TurnChange:
+    current: Slot | None  # кого кликати (None — більше нікого)
+    upcoming: Slot | None  # кого попередити «готуйся»
+
+
 @dataclass
 class Queue:
     chat_id: int
@@ -124,18 +130,20 @@ class Queue:
         if nxt is not None:
             nxt.status = SlotStatus.CURRENT
 
-    def pop_new_current(self) -> Slot | None:
-        """Повертає поточного, якщо він змінився з минулого виклику.
+    def pop_turn_change(self) -> TurnChange | None:
+        """Чи змінився поточний з минулого виклику.
 
-        Обробники викликають це після кожної операції: якщо повернувся слот —
-        треба тегнути людину «твоя черга».
+        Сервіс викликає це після кожної операції:
+          - None                       — нічого не змінилось, мовчимо;
+          - TurnChange(current=слот)   — тегнути «твоя черга»;
+          - TurnChange(current=None)   — кликати більше нікого.
         """
         cur = self.current
         key = (self._index(cur), cur.user_id) if cur else None
         if key == self._last_called:
             return None
         self._last_called = key
-        return cur
+        return TurnChange(current=cur, upcoming=self.upcoming if cur else None)
 
     @property
     def is_finished(self) -> bool:
