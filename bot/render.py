@@ -68,12 +68,15 @@ def render_queue(queue: Queue) -> str:
     # «Готується» показуємо тільки коли хтось уже здає.
     upcoming = queue.upcoming if queue.current else None
     lines = [f"📋 <b>{escape(queue.title)}</b>", status, ""]
-    # Слоти йдуть у порядку виклику; той, хто повернувся, може стояти
-    # «не за часом». Тому перерву малюємо, лише коли час зростає з розривом.
+    # Слоти йдуть у порядку виклику, і той, хто повернувся, стоїть «не за часом».
+    # Тому перерви беремо з розкладу (відсортованих часів), а не з сусідніх
+    # рядків, і малюємо лінію, коли список «перетинає» перерву, рухаючись уперед.
+    schedule = sorted(parse_time(s.time) for s in queue.slots)
+    break_ends = [b for a, b in zip(schedule, schedule[1:]) if b - a > queue.step]
     latest: int | None = None
     for slot in queue.slots:
         minutes = parse_time(slot.time)
-        if latest is not None and minutes - latest > queue.step:
+        if latest is not None and any(latest < end <= minutes for end in break_ends):
             lines.append("<i>── перерва ──</i>")
         latest = minutes if latest is None else max(latest, minutes)
         lines.append(_slot_line(slot, upcoming))

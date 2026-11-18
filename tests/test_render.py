@@ -44,6 +44,23 @@ def test_returned_person_out_of_time_order_has_no_fake_break():
     assert text.index("U3") < text.index("U1") < text.index("U4")
 
 
+def test_return_in_the_middle_keeps_only_real_break():
+    # Як у симуляції: Андрій (10:30) пропущений і повернувся — між 10:25
+    # і 10:35 не має з'являтися фальшива перерва, а справжня (до 11:10) лишається.
+    times = parse_new_args("X 10:25-11:20 5 перерва 11:00-11:10").slot_times()
+    q = Queue(chat_id=1, thread_id=0, title="X", step=5, slots=[Slot(t) for t in times])
+    for uid in (1, 2, 3, 4):
+        q.join(uid, f"U{uid}")
+    q.join(5, "U5", "11:10")
+    q.start()
+    q.finish(1, is_admin=False)
+    q.skip()  # U2 (10:30)
+    q.here(2)  # 10:25 U1 | 10:35 U3 | 10:40 U4 | 10:30 U2 | ...
+    text = render_queue(q)
+    assert text.count("перерва") == 1
+    assert text.index("10:55") < text.index("перерва") < text.index("11:10")
+
+
 def test_render_long_queue_fits_telegram_limit():
     times = parse_new_args("X 08:00-13:00 5").slot_times()
     q = Queue(chat_id=1, thread_id=0, title="X" * 100, step=5, slots=[Slot(t) for t in times])
