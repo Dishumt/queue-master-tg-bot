@@ -1,0 +1,20 @@
+[project]
+name = "queue-master-tg-bot"
+version = "0.1.0"
+description = "Telegram-бот для черги на здачу лаб у груповому чаті"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13,<4",
+    "aiosqlite>=0.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
