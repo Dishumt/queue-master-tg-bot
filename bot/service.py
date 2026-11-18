@@ -4,7 +4,8 @@
   1. бере чергу з кешу і блокує її;
   2. виконує дію (чиста функція з queue_logic);
   3. зберігає в SQLite;
-  4. у фоні оновлює закріплене повідомлення і тегає наступного.
+  4. у фоні оновлює закріплене повідомлення і пише «твоя черга»;
+  5. переставляє таймер (автопропуск / нагадування «ти ще в кабінеті?»).
 
 Пункт 4 — фонові задачі, тому обробник одразу відповідає користувачу,
 не чекаючи, поки Telegram відредагує повідомлення. Це головне для швидкості.
@@ -14,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
+
 from bot import queue_logic
 from bot.queue_logic import Queue, QueueError, QueueStatus, TurnChange
 from bot.render import queue_keyboard, render_queue, render_turn, turn_keyboard
@@ -31,6 +34,10 @@ T = TypeVar("T")
 # Не частіше одного редагування закріпленого повідомлення на цей проміжок.
 # Перше редагування йде одразу, наступні зливаються в одне.
 REFRESH_INTERVAL = 1.0  # секунд
+# Через скільки зникає відповідь бота з помилкою на команду (щоб не смітити в чаті).
+ERROR_TTL = 15.0  # секунд
+# Скільки чекати на друге натискання «Виписатися».
+LEAVE_CONFIRM_WINDOW = 5.0  # секунд
 
 
 class QueueService:
@@ -41,9 +48,14 @@ class QueueService:
         self._refreshers: dict[QueueKey, asyncio.Task[None]] = {}
         self._announce_locks: dict[QueueKey, asyncio.Lock] = {}
         self._background: set[asyncio.Task[Any]] = set()
-        # Таймери автопропуску — окремо від _background, бо вони довгі
-        # (хвилини), і на них не треба чекати при зупинці.
+        # Довгі задачі (хвилини): таймери черг і відкладене видалення повідомлень.
+        # Окремо від _background, бо на них не треба чекати при зупинці.
         self._timers: dict[QueueKey, asyncio.Task[None]] = {}
+        self._delayed: set[asyncio.Task[Any]] = set()
+        # Останнє «твоя черга» кожної черги — його видаляємо, коли пишемо нове.
+        self._turn_messages: dict[int, int] = {}
+        # Перше натискання «Виписатися»: (id черги, user_id) -> коли натиснули.
+        self._leave_requests: dict[tuple[int, int], float] = {}
         self.refresh_interval = REFRESH_INTERVAL
 
     # ------------------------------------------------------------------
@@ -71,12 +83,25 @@ class QueueService:
         self._schedule_timer(queue)
         return result
 
+    def confirm_leave(self, queue_id: int, user_id: int) -> bool:
+        """«Виписатися» спрацьовує з другого натискання протягом 5 с.
+
+        Повертає True, якщо це друге натискання (можна виписувати).
+        """
+        key = (queue_id, user_id)
+        first = self._leave_requests.pop(key, None)
+        moment = time.monotonic()
+        if first is not None and moment - first <= LEAVE_CONFIRM_WINDOW:
+            return True
+        self._leave_requests[key] = moment
+        return False
+
     # ------------------------------------------------------------------
-    # Таймер автопропуску
+    # Таймери: автопропуск і нагадування
     # ------------------------------------------------------------------
 
     def _schedule_timer(self, queue: Queue, min_delay: float = 0.0) -> None:
-        """Перезапустити таймер «не натиснув Йду» під поточний стан черги.
+        """Перезапустити таймер черги під її поточний стан.
 
         Викликається після кожної дії: якщо поточний змінився або підтвердив —
         старий таймер скасовується, а новий ставиться тільки коли треба.
@@ -85,40 +110,41 @@ class QueueService:
         old = self._timers.pop(key, None)
         if old is not None:
             old.cancel()
-        deadline = queue.confirm_deadline
-        if deadline is not None:
+        moment = queue.next_timer_at
+        if moment is not None:
             self._timers[key] = asyncio.create_task(
-                self._timer(key, queue.id, deadline, min_delay)
+                self._timer(key, queue.id, moment, min_delay)
             )
 
     async def _timer(
-        self, key: QueueKey, queue_id: int | None, deadline: float, min_delay: float
+        self, key: QueueKey, queue_id: int | None, moment: float, min_delay: float
     ) -> None:
-        await asyncio.sleep(max(min_delay, deadline - queue_logic.now()))
+        await asyncio.sleep(max(min_delay, moment - queue_logic.now()))
         # Прибираємо себе зі списку ДО apply: apply поставить новий таймер
         # і не повинен скасувати цю задачу посеред роботи.
         if self._timers.get(key) is asyncio.current_task():
             del self._timers[key]
         try:
-            await self.apply(key, lambda q: q.expire(), queue_id)
+            await self.apply(key, lambda q: q.tick(), queue_id)
         except QueueError:
             pass  # черга закрилась, поки ми чекали
         except Exception:
-            log.exception("Помилка автопропуску в черзі %s", queue_id)
+            log.exception("Помилка таймера в черзі %s", queue_id)
 
     def start_timers(self, min_delay: float = 0.0) -> None:
         """Після перезапуску бота — відновити таймери всіх активних черг.
 
-        min_delay — мінімальна пауза перед автопропуском. Поки бот лежав,
+        min_delay — мінімальна пауза перед спрацюванням. Поки бот лежав,
         натиснути «Йду» було неможливо, тож при старті даємо людині ще шанс.
         """
         for queue in self.storage.all():
             self._schedule_timer(queue, min_delay)
 
     def stop_timers(self) -> None:
-        for task in self._timers.values():
+        for task in [*self._timers.values(), *self._delayed]:
             task.cancel()
         self._timers.clear()
+        self._delayed.clear()
 
     # ------------------------------------------------------------------
     # Нова черга / перепублікація
@@ -222,26 +248,45 @@ class QueueService:
         text = render_turn(queue, change)
         if text is None:
             return
-        keyboard = turn_keyboard(queue) if change.current is not None else None
+        keyboard = turn_keyboard(queue, change) if queue.current is not None else None
         key = (queue.chat_id, queue.thread_id)
         lock = self._announce_locks.setdefault(key, asyncio.Lock())
 
         async def send() -> None:
             async with lock:  # щоб оголошення не переплутали порядок
-                await self._safe(
-                    self.bot.send_message(
+                try:
+                    msg = await self.bot.send_message(
                         queue.chat_id,
                         text,
                         message_thread_id=queue.thread_id or None,
                         reply_markup=keyboard,
                     )
-                )
+                except TelegramAPIError as e:
+                    log.warning("Не вдалося надіслати оголошення: %s", e)
+                    return
+                # У чаті лишається тільки останнє «твоя черга» — менше шуму.
+                # Свої повідомлення бот може видаляти й без прав адміна.
+                previous = self._turn_messages.get(queue.id)
+                self._turn_messages[queue.id] = msg.message_id
+                if previous is not None:
+                    await self._safe(self.bot.delete_message(queue.chat_id, previous))
 
         self._spawn(send())
 
     # ------------------------------------------------------------------
     # Допоміжне
     # ------------------------------------------------------------------
+
+    def delete_later(self, chat_id: int, message_id: int, delay: float = ERROR_TTL) -> None:
+        """Видалити повідомлення бота через `delay` секунд (відповіді з помилками)."""
+
+        async def run() -> None:
+            await asyncio.sleep(delay)
+            await self._safe(self.bot.delete_message(chat_id, message_id))
+
+        task = asyncio.create_task(run())
+        self._delayed.add(task)
+        task.add_done_callback(self._delayed.discard)
 
     def _spawn(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         # Тримаємо посилання на задачу, інакше збирач сміття може її прибрати.

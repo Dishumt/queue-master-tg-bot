@@ -11,27 +11,45 @@ from aiogram.types import CallbackQuery, Message, User
 from bot.handlers.helpers import display_name, key_of, ok, require_admin
 from bot.parsing import normalize_time
 from bot.permissions import AdminCache
-from bot.render import parse_callback
+from bot.queue_logic import Entered
+from bot.render import BTN_DONE, BTN_LEAVE, parse_callback, people, render_position
 from bot.service import QueueService
 from bot.storage import QueueKey
 
 router = Router(name="student")
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
 
-# «Закінчив» у відповідь на повідомлення бота.
+# «Закінчив(ла)» у відповідь на повідомлення бота.
 DONE_RE = re.compile(
-    r"^\s*(закінчи(в|ла|ли)|закінчено|готово|все|всьо|здав|здала|done|finished)\W*\s*$",
+    r"^\s*(закінчи(в|ла|ли)|закінчено|готово|все|всьо|здав|здала|здано|done|finished)\W*\s*$",
     re.IGNORECASE,
 )
 
+ENTER_ANSWERS = {
+    Entered.CONFIRMED: "🏃 Чекаємо! Після здачі натисни «{done}».",
+    Entered.CLOSED: "🚪 Успіхів! Попередньому поставлено «{done}».",
+    Entered.SKIPPED: "🚪 Успіхів! Попередній не прийшов — його пропущено.",
+    Entered.DEFERRED: "🚪 Успіхів! Попереднього покликали зарано — піде після тебе, без штрафу.",
+}
+
 
 async def _finish(service: QueueService, admins: AdminCache, key: QueueKey, event, user: User, queue_id=None):
-    # Адмінів питаємо в Telegram тільки якщо «закінчив» натиснув не поточний —
+    # Адмінів питаємо в Telegram тільки якщо «Готово» натиснув не поточний —
     # у звичайному випадку зайвого запиту немає.
     queue = service.get(key, queue_id)
     is_current = queue.current is not None and queue.current.user_id == user.id
     is_admin = False if is_current else await admins.is_admin(event)
     return await service.apply(key, lambda q: q.finish(user.id, is_admin), queue_id)
+
+
+async def _enter(service: QueueService, admins: AdminCache, key: QueueKey, event, user: User, queue_id=None):
+    # Адмінів питаємо тільки якщо натиснув не наступний у черзі.
+    queue = service.get(key, queue_id)
+    is_next = queue.upcoming is not None and queue.upcoming.user_id == user.id
+    is_current = queue.current is not None and queue.current.user_id == user.id
+    is_admin = False if is_next or is_current else await admins.is_admin(event)
+    outcome, _ = await service.apply(key, lambda q: q.enter(user.id, is_admin), queue_id)
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -52,24 +70,36 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
     match action:
         case "join":
             name = display_name(service, user)
-            slot = await service.apply(key, lambda q: q.join(user.id, name), queue_id)
-            await cb.answer(f"✋ Записав тебе на {slot.time}")
+            returned, slot = await service.apply(key, lambda q: q.sign_up(user.id, name), queue_id)
+            if returned:
+                ahead = service.get(key, queue_id).people_ahead(slot)
+                await cb.answer(f"🙋 З поверненням! Перед тобою {people(ahead)}.")
+            else:
+                await cb.answer(f"✋ Тебе записано на {slot.time}")
+        case "here":
+            slot = await service.apply(key, lambda q: q.here(user.id), queue_id)
+            ahead = service.get(key, queue_id).people_ahead(slot)
+            await cb.answer(f"🙋 З поверненням! Перед тобою {people(ahead)}.")
         case "leave":
+            if not service.confirm_leave(queue_id, user.id):
+                await cb.answer(f"Точно виписатися? Натисни «{BTN_LEAVE}» ще раз протягом 5 с.")
+                return
             slot = await service.apply(key, lambda q: q.leave(user.id), queue_id)
-            await cb.answer(f"🚪 Слот {slot.time} звільнено")
+            await cb.answer(f"Слот {slot.time} звільнено")
+        case "where":
+            await cb.answer(render_position(service.get(key, queue_id), user.id), show_alert=True)
         case "coming":
             await service.apply(key, lambda q: q.confirm(user.id), queue_id)
-            await cb.answer("🏃 Окей, чекаємо тебе!")
+            await cb.answer(
+                f"🏃 Чекаємо! Як вийдеш — натисни «{BTN_DONE}», інакше наступні не дізнаються.",
+                show_alert=True,
+            )
         case "done":
             await _finish(service, admins, key, cb, user, queue_id)
-            await cb.answer("✅ Записав, що здав. Молодець!")
-        case "absent":
-            # Адмінів питаємо тільки якщо натиснув не наступний у черзі.
-            queue = service.get(key, queue_id)
-            is_next = queue.upcoming is not None and queue.upcoming.user_id == user.id
-            is_admin = False if is_next else await admins.is_admin(cb)
-            slot = await service.apply(key, lambda q: q.absent(user.id, is_admin), queue_id)
-            await cb.answer(f"⏭ {slot.name} пропущено")
+            await cb.answer("✅ Здачу відмічено. Молодець!")
+        case "enter":
+            outcome = await _enter(service, admins, key, cb, user, queue_id)
+            await cb.answer(ENTER_ANSWERS[outcome].format(done=BTN_DONE))
         case "later":
             mine, _ = await service.apply(key, lambda q: q.later(user.id), queue_id)
             await cb.answer(f"⏬ Тепер ти на {mine.time}")
@@ -83,9 +113,12 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
 @router.message(Command("join"))
 async def cmd_join(message: Message, command: CommandObject, service: QueueService):
     user = message.from_user
-    time = normalize_time(command.args) if command.args else None
     name = display_name(service, user)
-    await service.apply(key_of(message), lambda q: q.join(user.id, name, time))
+    if command.args:
+        time = normalize_time(command.args)
+        await service.apply(key_of(message), lambda q: q.join(user.id, name, time))
+    else:  # як кнопка «✋»: записатися або повернутися після пропуску
+        await service.apply(key_of(message), lambda q: q.sign_up(user.id, name))
     await ok(message)
 
 
@@ -123,6 +156,12 @@ async def cmd_done(message: Message, command: CommandObject, service: QueueServi
     await ok(message)
 
 
+@router.message(Command("enter"))
+async def cmd_enter(message: Message, service: QueueService, admins: AdminCache):
+    await _enter(service, admins, key_of(message), message, message.from_user)
+    await ok(message)
+
+
 # ---------------------------------------------------------------------------
 # Відповідь «Закінчив» на повідомлення бота
 # ---------------------------------------------------------------------------
@@ -137,4 +176,3 @@ async def reply_done(message: Message, bot: Bot, service: QueueService, admins: 
         return  # черги тут немає — мовчимо
     await _finish(service, admins, key, message, message.from_user)
     await ok(message)
-

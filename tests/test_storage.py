@@ -102,3 +102,27 @@ async def test_migrates_database_from_first_version(tmp_path):
     assert q.wait_minutes == 3
     assert q.slots[0].skips == 0 and q.slots[0].confirmed is False
     await storage.close()
+
+
+async def test_turn_details_survive_restart(tmp_path):
+    path = str(tmp_path / "q.db")
+    storage = Storage(path)
+    await storage.open()
+    q = Queue(chat_id=2, thread_id=0, title="Л", step=5, slots=[Slot("10:00"), Slot("10:05")])
+    await storage.create(q, created_by=1)
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    q.confirm(1)
+    q.enter(2, is_admin=True)  # A забув «Готово» — закрито автоматично
+    q.current.nudged = True
+    await storage.save(q)
+    await storage.close()
+
+    storage = Storage(path)
+    await storage.open()
+    loaded = storage.get((2, 0))
+    a = loaded.find_user(1)
+    assert a.auto_done and a.done_at is not None
+    assert loaded.current.nudged and loaded.current.confirmed
+    await storage.close()

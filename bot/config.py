@@ -11,6 +11,7 @@ from pathlib import Path
 class Config:
     bot_token: str
     db_path: str
+    timezone: str  # у якому поясі записаний час слотів («10:25»)
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -35,4 +36,8 @@ def load_config(env_file: str = ".env") -> Config:
         raise SystemExit(
             "Не задано BOT_TOKEN. Скопіюй .env.example у .env і впиши токен від @BotFather."
         )
-    return Config(bot_token=token, db_path=env.get("DB_PATH") or "queue.db")
+    return Config(
+        bot_token=token,
+        db_path=env.get("DB_PATH") or "queue.db",
+        timezone=env.get("TIMEZONE") or "Europe/Kyiv",
+    )

@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS slots (
     skips     INTEGER NOT NULL DEFAULT 0,
     called_at REAL,
     confirmed INTEGER NOT NULL DEFAULT 0,
+    done_at   REAL,
+    nudged    INTEGER NOT NULL DEFAULT 0,
+    auto_done INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (queue_id, position)
 );
 
@@ -65,10 +68,19 @@ _ADDED_COLUMNS = {
         "skips": "INTEGER NOT NULL DEFAULT 0",
         "called_at": "REAL",
         "confirmed": "INTEGER NOT NULL DEFAULT 0",
+        "done_at": "REAL",
+        "nudged": "INTEGER NOT NULL DEFAULT 0",
+        "auto_done": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
-_SLOT_COLUMNS = "time, user_id, name, status, skips, called_at, confirmed"
+# Поля слота в тому порядку, в якому вони читаються і пишуться.
+# Додаєш поле в Slot — додай його сюди, у _slot_row/_slot_from_row і в схему вище.
+_SLOT_FIELDS = (
+    "time", "user_id", "name", "status", "skips",
+    "called_at", "confirmed", "done_at", "nudged", "auto_done",
+)  # fmt: skip
+_SLOT_COLUMNS = ", ".join(_SLOT_FIELDS)
 
 
 def _slot_row(slot: Slot) -> tuple:
@@ -80,6 +92,25 @@ def _slot_row(slot: Slot) -> tuple:
         slot.skips,
         slot.called_at,
         int(slot.confirmed),
+        slot.done_at,
+        int(slot.nudged),
+        int(slot.auto_done),
+    )
+
+
+def _slot_from_row(row: tuple) -> Slot:
+    time_, user_id, name, status, skips, called_at, confirmed, done_at, nudged, auto_done = row
+    return Slot(
+        time=time_,
+        user_id=user_id,
+        name=name,
+        status=SlotStatus(status),
+        skips=skips,
+        called_at=called_at,
+        confirmed=bool(confirmed),
+        done_at=done_at,
+        nudged=bool(nudged),
+        auto_done=bool(auto_done),
     )
 
 
@@ -142,18 +173,7 @@ class Storage:
                 f"SELECT {_SLOT_COLUMNS} FROM slots WHERE queue_id = ? ORDER BY position",
                 (qid,),
             ) as cur:
-                slots = [
-                    Slot(
-                        time=t,
-                        user_id=uid,
-                        name=name,
-                        status=SlotStatus(st),
-                        skips=skips,
-                        called_at=called_at,
-                        confirmed=bool(confirmed),
-                    )
-                    for t, uid, name, st, skips, called_at, confirmed in await cur.fetchall()
-                ]
+                slots = [_slot_from_row(row) for row in await cur.fetchall()]
             queue = Queue(
                 chat_id=chat_id,
                 thread_id=thread_id,
@@ -201,7 +221,7 @@ class Storage:
         queue.id = cur.lastrowid
         await self.db.executemany(
             f"INSERT INTO slots (queue_id, position, {_SLOT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"VALUES ({', '.join('?' * (len(_SLOT_FIELDS) + 2))})",
             [(queue.id, i, *_slot_row(s)) for i, s in enumerate(queue.slots)],
         )
         await self.db.commit()
@@ -217,8 +237,8 @@ class Storage:
         # position — місце в порядку виклику. Слот міг переїхати (повернення
         # після пропуску), тому оновлюємо і time теж.
         await self.db.executemany(
-            "UPDATE slots SET time = ?, user_id = ?, name = ?, status = ?, skips = ?, "
-            "called_at = ?, confirmed = ? WHERE queue_id = ? AND position = ?",
+            f"UPDATE slots SET {', '.join(f'{c} = ?' for c in _SLOT_FIELDS)} "
+            "WHERE queue_id = ? AND position = ?",
             [(*_slot_row(s), queue.id, i) for i, s in enumerate(queue.slots)],
         )
         await self.db.commit()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot, Dispatcher
@@ -16,6 +17,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    DeleteMessage,
     EditMessageText,
     GetChatAdministrators,
     GetMe,
@@ -27,6 +29,7 @@ from aiogram.methods import (
 from aiogram.types import CallbackQuery, Chat, ChatMemberOwner, Message, Update, User
 
 from bot.handlers import build_router
+from bot.queue_logic import SlotStatus, slot_moment
 from bot.permissions import AdminCache
 from bot.service import QueueService
 from bot.storage import Storage
@@ -38,6 +41,7 @@ OLENA = User(id=2, is_bot=False, first_name="Олена")
 ANDRII = User(id=3, is_bot=False, first_name="Андрій")
 BOT_USER = User(id=BOT_ID, is_bot=True, first_name="Queue", username="queue_bot")
 CHAT = Chat(id=CHAT_ID, type="supergroup", title="КН-21")
+LAB_DAY = datetime(2026, 11, 20, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv")).timestamp()
 
 # Роутери aiogram можна підключити лише один раз, тому Dispatcher спільний,
 # а сервіс і сховище в нього підставляються свіжі для кожного тесту.
@@ -210,47 +214,89 @@ async def test_name_command_renames_in_queue(env):
     assert "Коваленко Олена" in edits[-1].text
 
 
-async def test_no_show_flow(env, monkeypatch):
-    clock = {"t": 1000.0}
+async def run_due_timer(env) -> None:
+    """Те, що бот робить після перезапуску: ставить таймери і, якщо час уже вийшов, спрацьовує."""
+    env.service.start_timers()
+    await env.service._timers[(CHAT_ID, 0)]
+    await env.service.wait_background()
+
+
+async def test_no_show_and_forgotten_done_flow(env, monkeypatch):
+    clock = {"t": slot_moment("10:00", LAB_DAY)}
     monkeypatch.setattr("bot.queue_logic.now", lambda: clock["t"])
     marta = User(id=4, is_bot=False, first_name="Марта")
 
     await env.send(ADMIN, "/new Лаба 10:00-10:30 чекати 2")
     queue = env.storage.get((CHAT_ID, 0))
     assert queue.wait_minutes == 2
-    for user in (OLENA, ANDRII, marta):
+    for user in (OLENA, ANDRII, marta):  # 10:00, 10:05, 10:10
         await env.send(user, "/join")
     await env.send(ADMIN, "/go")
-    assert "протягом 2 хв" in env.session.texts()[-1]
+    assert "до 10:02" in env.session.texts()[-1]
 
-    # Андрій (наступний) намагається пропустити Олену одразу — зарано.
-    await env.press(ANDRII, f"q:absent:{queue.id}", queue.message_id)
-    assert "ще" in last_answer(env.session).text
+    def press(user, action):
+        return env.press(user, f"q:{action}:{queue.id}", queue.message_id)
 
-    # Минула хвилина — тепер можна.
+    # Андрій (наступний) хоче зайти одразу — зарано, Олену щойно покликали.
+    await press(ANDRII, "enter")
+    assert "дай ще" in last_answer(env.session).text
+
+    # Минула хвилина, Олени немає — Андрій заходить, Олену пропущено.
     clock["t"] += 60
-    await env.press(ANDRII, f"q:absent:{queue.id}", queue.message_id)
+    await press(ANDRII, "enter")
     text = env.session.texts()[-1]
     assert text.startswith("⏭ ") and f"id={OLENA.id}" in text
-    assert f"id={ANDRII.id}" in text and "твоя черга" in text
-
-    # Андрій підтверджує — автопропуск його не чіпає.
-    await env.press(ANDRII, f"q:coming:{queue.id}", queue.message_id)
+    assert "Зараз здає" in text and f"id={ANDRII.id}" in text
     assert queue.current.confirmed
-    assert (CHAT_ID, 0) not in env.service._timers
+    # Попереднє «твоя черга» видалено — у чаті лише актуальне.
+    assert env.session.sent(DeleteMessage)
 
-    # Олена прибігає: 1-й пропуск → пропускає вперед Марту.
-    await env.send(OLENA, "/here")
-    await env.send(ANDRII, "/done")
-    assert queue.current.user_id == marta.id
-    assert queue.upcoming.user_id == OLENA.id
+    # Олена прибігає і тисне ✋ — повертається зі штрафом: Марта йде раніше.
+    await press(OLENA, "join")
+    assert "З поверненням" in last_answer(env.session).text
+    waiting = [s.user_id for s in queue.slots if s.status is SlotStatus.WAITING]
+    assert waiting == [marta.id, OLENA.id]
 
-    # Марта не натискає «Йду» 2 хвилини — бот пропускає її сам.
-    # (start_timers — те саме, що робить бот після перезапуску.)
-    clock["t"] += 121
-    env.service.start_timers()
-    await env.service._timers[(CHAT_ID, 0)]  # таймер одразу бачить, що час вийшов
-    await env.service.wait_background()
+    # Андрій вийшов і забув «Готово». Марта під дверима — тисне «Заходжу».
+    clock["t"] += 300
+    await press(marta, "enter")
     text = env.session.texts()[-1]
-    assert text.startswith("⏭ ") and f"id={marta.id}" in text
+    assert "поставлено автоматично" in text and f"id={ANDRII.id}" in text
+    assert f"id={OLENA.id}" in text and "готуйся" in text  # ланцюжок не перервався
+
+    # «Де я?» — спливаюче лише для Олени.
+    await press(OLENA, "where")
+    assert last_answer(env.session).text == "Перед тобою 1 людина, орієнтовно ~5 хв."
+
+    # Марта здає довго — бот нагадує (не раніше ніж через 10 хв).
+    clock["t"] += 600
+    await run_due_timer(env)
+    text = env.session.texts()[-1]
+    assert text.startswith("⏰ ") and f"id={marta.id}" in text
+
+    # Марта натискає «Готово» — кличуть Олену.
+    await press(marta, "done")
     assert queue.current.user_id == OLENA.id
+
+    # Олена знову не натискає «Йду» 2 хвилини — бот пропускає її сам.
+    clock["t"] += 121
+    await run_due_timer(env)
+    text = env.session.texts()[-1]
+    assert text.startswith("⏭ ") and f"id={OLENA.id}" in text
+    assert "Більше нікого" in text
+
+
+async def test_leave_needs_double_press_and_errors_disappear(env):
+    await env.send(ADMIN, "/new Лаба 10:00-10:10")
+    queue = env.storage.get((CHAT_ID, 0))
+    await env.press(OLENA, f"q:join:{queue.id}", queue.message_id)
+    await env.press(OLENA, f"q:leave:{queue.id}", queue.message_id)
+    assert "ще раз" in last_answer(env.session).text
+    assert queue.find_user(OLENA.id) is not None  # перше натискання нічого не змінює
+    await env.press(OLENA, f"q:leave:{queue.id}", queue.message_id)
+    assert queue.find_user(OLENA.id) is None
+
+    # Помилка на команду — відповідь у чаті, видалення якої вже заплановано.
+    await env.send(OLENA, "/leave")
+    assert "немає в цій черзі" in env.session.texts()[-1]
+    assert env.service._delayed
