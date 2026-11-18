@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS queues (
     title       TEXT    NOT NULL,
     step        INTEGER NOT NULL,
     status      TEXT    NOT NULL,
+    wait_minutes INTEGER NOT NULL DEFAULT 3,
     message_id  INTEGER,
     created_by  INTEGER,
     created_at  INTEGER NOT NULL
@@ -43,6 +44,9 @@ CREATE TABLE IF NOT EXISTS slots (
     user_id   INTEGER,
     name      TEXT,
     status    TEXT    NOT NULL,
+    skips     INTEGER NOT NULL DEFAULT 0,
+    called_at REAL,
+    confirmed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (queue_id, position)
 );
 
@@ -52,6 +56,31 @@ CREATE TABLE IF NOT EXISTS users (
     name     TEXT NOT NULL
 );
 """
+
+# Колонки, яких не було в першій версії. Якщо база створена старим кодом,
+# _migrate() їх допише (CREATE TABLE IF NOT EXISTS не змінює вже існуючі таблиці).
+_ADDED_COLUMNS = {
+    "queues": {"wait_minutes": "INTEGER NOT NULL DEFAULT 3"},
+    "slots": {
+        "skips": "INTEGER NOT NULL DEFAULT 0",
+        "called_at": "REAL",
+        "confirmed": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+_SLOT_COLUMNS = "time, user_id, name, status, skips, called_at, confirmed"
+
+
+def _slot_row(slot: Slot) -> tuple:
+    return (
+        slot.time,
+        slot.user_id,
+        slot.name,
+        slot.status.value,
+        slot.skips,
+        slot.called_at,
+        int(slot.confirmed),
+    )
 
 
 class Storage:
@@ -73,6 +102,7 @@ class Storage:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
         await self._load()
 
@@ -87,23 +117,42 @@ class Storage:
             raise RuntimeError("Storage.open() не викликано")
         return self._db
 
+    async def _migrate(self) -> None:
+        for table, columns in _ADDED_COLUMNS.items():
+            async with self.db.execute(f"PRAGMA table_info({table})") as cur:
+                existing = {row[1] for row in await cur.fetchall()}
+            for column, definition in columns.items():
+                if column not in existing:
+                    await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def all(self) -> list[Queue]:
+        """Усі активні черги (для відновлення таймерів після перезапуску)."""
+        return list(self._queues.values())
+
     async def _load(self) -> None:
         async with self.db.execute(
-            "SELECT id, chat_id, thread_id, title, step, status, message_id "
+            "SELECT id, chat_id, thread_id, title, step, status, wait_minutes, message_id "
             "FROM queues WHERE status != ? ORDER BY id",
             (QueueStatus.CLOSED.value,),
         ) as cur:
             rows = await cur.fetchall()
 
-        for qid, chat_id, thread_id, title, step, status, message_id in rows:
+        for qid, chat_id, thread_id, title, step, status, wait, message_id in rows:
             async with self.db.execute(
-                "SELECT time, user_id, name, status FROM slots "
-                "WHERE queue_id = ? ORDER BY position",
+                f"SELECT {_SLOT_COLUMNS} FROM slots WHERE queue_id = ? ORDER BY position",
                 (qid,),
             ) as cur:
                 slots = [
-                    Slot(time=t, user_id=uid, name=name, status=SlotStatus(st))
-                    for t, uid, name, st in await cur.fetchall()
+                    Slot(
+                        time=t,
+                        user_id=uid,
+                        name=name,
+                        status=SlotStatus(st),
+                        skips=skips,
+                        called_at=called_at,
+                        confirmed=bool(confirmed),
+                    )
+                    for t, uid, name, st, skips, called_at, confirmed in await cur.fetchall()
                 ]
             queue = Queue(
                 chat_id=chat_id,
@@ -112,6 +161,7 @@ class Storage:
                 step=step,
                 slots=slots,
                 status=QueueStatus(status),
+                wait_minutes=wait,
                 message_id=message_id,
                 id=qid,
             )
@@ -134,14 +184,15 @@ class Storage:
 
     async def create(self, queue: Queue, created_by: int) -> Queue:
         cur = await self.db.execute(
-            "INSERT INTO queues (chat_id, thread_id, title, step, status, message_id, "
-            "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO queues (chat_id, thread_id, title, step, status, wait_minutes, "
+            "message_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 queue.chat_id,
                 queue.thread_id,
                 queue.title,
                 queue.step,
                 queue.status.value,
+                queue.wait_minutes,
                 queue.message_id,
                 created_by,
                 int(time.time()),
@@ -149,12 +200,9 @@ class Storage:
         )
         queue.id = cur.lastrowid
         await self.db.executemany(
-            "INSERT INTO slots (queue_id, position, time, user_id, name, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (queue.id, i, s.time, s.user_id, s.name, s.status.value)
-                for i, s in enumerate(queue.slots)
-            ],
+            f"INSERT INTO slots (queue_id, position, {_SLOT_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(queue.id, i, *_slot_row(s)) for i, s in enumerate(queue.slots)],
         )
         await self.db.commit()
         self._queues[(queue.chat_id, queue.thread_id)] = queue
@@ -163,16 +211,15 @@ class Storage:
     async def save(self, queue: Queue) -> None:
         """Записати поточний стан черги. Закриті черги прибираються з кешу."""
         await self.db.execute(
-            "UPDATE queues SET status = ?, message_id = ? WHERE id = ?",
-            (queue.status.value, queue.message_id, queue.id),
+            "UPDATE queues SET status = ?, wait_minutes = ?, message_id = ? WHERE id = ?",
+            (queue.status.value, queue.wait_minutes, queue.message_id, queue.id),
         )
+        # position — місце в порядку виклику. Слот міг переїхати (повернення
+        # після пропуску), тому оновлюємо і time теж.
         await self.db.executemany(
-            "UPDATE slots SET user_id = ?, name = ?, status = ? "
-            "WHERE queue_id = ? AND position = ?",
-            [
-                (s.user_id, s.name, s.status.value, queue.id, i)
-                for i, s in enumerate(queue.slots)
-            ],
+            "UPDATE slots SET time = ?, user_id = ?, name = ?, status = ?, skips = ?, "
+            "called_at = ?, confirmed = ? WHERE queue_id = ? AND position = ?",
+            [(*_slot_row(s), queue.id, i) for i, s in enumerate(queue.slots)],
         )
         await self.db.commit()
         key = (queue.chat_id, queue.thread_id)

@@ -30,6 +30,13 @@ def test_screenshot_like_schedule():
     assert times[-1] == "13:00"
 
 
+def test_wait():
+    assert parse_new_args("X 10:00-11:00").wait == 3
+    args = parse_new_args("X 10:00-11:00 10 чекати 5 перерва 10:20-10:40")
+    assert (args.step, args.wait, args.breaks) == (10, 5, [(600 + 20, 600 + 40)])
+    assert parse_new_args("X 10:00-11:00 перерва 10:20-10:40 чекати 0").wait == 0
+
+
 @pytest.mark.parametrize(
     "text, error",
     [
@@ -41,6 +48,8 @@ def test_screenshot_like_schedule():
         ("X 10:00-11:00 0", "від 1 до 180"),
         ("X 10:00-10:05 перерва 10:00-10:05", "0 слотів"),
         ("X 08:00-20:00 5", str(MAX_SLOTS)),
+        ("X 10:00-11:00 чекати", "кількість хвилин"),
+        ("X 10:00-11:00 чекати 99", "від 0 до 60"),
     ],
 )
 def test_errors(text, error):

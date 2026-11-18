@@ -5,6 +5,7 @@
   - «10:25-13:00»  — слоти від 10:25 до 13:00 (13:00 не включно)
   - «5»            — крок у хвилинах (за замовчуванням 5)
   - «перерва ...»  — один чи кілька проміжків без слотів (кінець не включно)
+  - «чекати 3»     — скільки хвилин чекати на «🏃 Йду» (0 — без автопропуску)
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from bot.queue_logic import QueueError
+from bot.queue_logic import DEFAULT_WAIT_MINUTES, QueueError
 
 MAX_SLOTS = 60  # щоб закріплене повідомлення влізло в ліміт Telegram (4096 символів)
 MAX_NAME_LEN = 40
@@ -24,6 +25,7 @@ _RANGE_RE = re.compile(rf"^({_TIME})-({_TIME})$")
 _STEP_RE = re.compile(r"^(\d{1,3})(?:хв|хвилин|m|min)?$", re.IGNORECASE)
 _DASHES_RE = re.compile(rf"({_TIME})\s*[-–—]\s*({_TIME})")
 _BREAK_WORDS = {"перерва", "перерви", "break", "breaks"}
+_WAIT_WORDS = {"чекати", "очікування", "wait"}
 
 
 def parse_time(text: str) -> int:
@@ -61,6 +63,7 @@ class NewQueueArgs:
     end: int
     step: int = DEFAULT_STEP
     breaks: list[tuple[int, int]] = field(default_factory=list)
+    wait: int = DEFAULT_WAIT_MINUTES
 
     def slot_times(self) -> list[str]:
         times = []
@@ -93,7 +96,9 @@ NEW_USAGE = (
     "Формат: <code>/new Назва 10:25-13:00 5 перерва 12:00-12:20</code>\n"
     "• проміжок — коли приймають (кінець не включно)\n"
     "• число — крок у хвилинах (необов'язково, за замовчуванням 5)\n"
-    "• перерва — проміжки без слотів (необов'язково)"
+    "• перерва — проміжки без слотів (необов'язково)\n"
+    f"• чекати N — скільки хвилин чекати на «🏃 Йду», потім автопропуск "
+    f"(за замовчуванням {DEFAULT_WAIT_MINUTES}, 0 — вимкнути)"
 )
 
 
@@ -111,18 +116,39 @@ def parse_new_args(text: str) -> NewQueueArgs:
     start, end = _parse_range(tokens[range_at])  # type: ignore[misc]
     args = NewQueueArgs(title=title[:100], start=start, end=end)
 
+    # Невеликий автомат: mode — що ми зараз читаємо.
+    #   step   — одразу після проміжку може йти крок
+    #   breaks — після слова «перерва» йдуть проміжки
+    #   wait   — після слова «чекати» йде одне число
+    mode = "step"
     step_set = False
-    in_breaks = False
     for token in tokens[range_at + 1 :]:
-        if token.lower() in _BREAK_WORDS:
-            in_breaks = True
-        elif in_breaks and (rng := _parse_range(token)):
+        word = token.lower()
+        if word in _BREAK_WORDS:
+            mode = "breaks"
+        elif word in _WAIT_WORDS:
+            mode = "wait"
+        elif mode == "breaks" and (rng := _parse_range(token)):
             args.breaks.append(rng)
-        elif not step_set and not in_breaks and (m := _STEP_RE.match(token)):
+        elif mode == "wait":
+            args.wait = parse_wait(token)
+            mode = "done"
+        elif mode == "step" and not step_set and (m := _STEP_RE.match(token)):
             args.step = int(m.group(1))
             if not 1 <= args.step <= 180:
                 raise QueueError("Крок має бути від 1 до 180 хвилин.")
             step_set = True
         else:
             raise QueueError(f"Не зрозумів «{token}».\n\n" + NEW_USAGE)
+    if mode == "wait":
+        raise QueueError("Після «чекати» вкажи кількість хвилин, наприклад: чекати 3")
     return args
+
+
+def parse_wait(text: str) -> int:
+    """'3' або '3хв' -> 3. Дозволено 0–60 (0 — без автопропуску)."""
+    m = _STEP_RE.match(text.strip())
+    minutes = int(m.group(1)) if m else -1
+    if not 0 <= minutes <= 60:
+        raise QueueError("Час очікування — від 0 до 60 хвилин (0 — вимкнути автопропуск).")
+    return minutes
