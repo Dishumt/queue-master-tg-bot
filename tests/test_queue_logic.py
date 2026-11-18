@@ -179,19 +179,179 @@ def test_done_cannot_leave():
 # ---------------------------------------------------------------- пропуски
 
 
-def test_skip_and_return():
-    q = make_queue()
-    for uid in (1, 2, 3):
+def call_order(q: Queue) -> list[str]:
+    """Імена в порядку виклику: поточний, потім ті, хто чекає."""
+    order = [s.name for s in q.slots if s.status is SlotStatus.CURRENT]
+    return order + [s.name for s in q.slots if s.status is SlotStatus.WAITING]
+
+
+def test_first_return_lets_one_person_ahead():
+    q = make_queue(8)
+    for uid in range(1, 6):
         q.join(uid, f"U{uid}")
     q.start()
     q.skip()  # U1 не прийшов
     assert q.current.name == "U2"
-    q.here(1)  # U1 прибіг
-    assert q.upcoming.name == "U1"  # іде одразу після поточного
+    q.here(1)  # U1 прибіг — пропускає вперед одного (U3)
+    assert call_order(q) == ["U2", "U3", "U1", "U4", "U5"]
+    assert q.find_user(1).time == "10:25"  # час-мітка переїхала разом із людиною
+
+
+def test_second_return_lets_two_ahead_then_end():
+    q = make_queue(10)
+    for uid in range(1, 8):
+        q.join(uid, f"U{uid}")
+    q.start()
+    q.skip()
+    q.here(1)  # 1-й пропуск: U2 | U3 U1 U4 ...
     q.finish(2, is_admin=False)
+    q.finish(3, is_admin=False)
     assert q.current.name == "U1"
-    q.finish(1, is_admin=False)
-    assert q.current.name == "U3"
+    q.skip()  # знову не прийшов
+    q.here(1)  # 2-й пропуск: U4 | U5 U6 U1 U7
+    assert call_order(q) == ["U4", "U5", "U6", "U1", "U7"]
+    q.finish(4, is_admin=False)
+    q.finish(5, is_admin=False)
+    q.finish(6, is_admin=False)
+    q.skip()  # утретє
+    q.here(1)  # далі — завжди в кінець
+    assert call_order(q) == ["U7", "U1"]
+
+
+def test_return_to_end_goes_after_last_occupied_slot():
+    q = make_queue(8)
+    q.join(1, "U1")
+    q.join(2, "U2")
+    q.join(3, "U3")
+    q.find_user(1).skips = 2  # уже двічі пропускали
+    q.start()
+    q.skip()
+    q.here(1)
+    assert call_order(q) == ["U2", "U3", "U1"]
+    # Хто запишеться пізніше — піде вже після U1.
+    q.join(4, "U4")
+    assert call_order(q) == ["U2", "U3", "U1", "U4"]
+
+
+def test_return_with_nobody_waiting_calls_immediately():
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    q.skip()
+    q.here(1)  # чекає тільки B (поточний) — після нього нікого, тож A наступна
+    assert call_order(q) == ["B", "A"]
+
+
+# ---------------------------------------------------------------- «Йду» і автопропуск
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Керований годинник: clock.t — поточний час у секундах."""
+
+    class Clock:
+        t = 1000.0
+
+    c = Clock()
+    monkeypatch.setattr("bot.queue_logic.now", lambda: c.t)
+    return c
+
+
+def test_auto_skip_after_timeout(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    assert q.confirm_deadline == 1000 + 3 * 60
+    clock.t += 179
+    assert q.expire() is None  # ще є секунда
+    clock.t += 1
+    assert q.expire().name == "A"
+    assert q.current.name == "B"
+    assert q.confirm_deadline == clock.t + 180  # B має свої 3 хвилини
+
+
+def test_confirm_disables_auto_skip(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    with pytest.raises(QueueError, match="не твоя черга"):
+        q.confirm(2)
+    q.confirm(1)
+    assert q.confirm_deadline is None
+    clock.t += 3600
+    assert q.expire() is None
+    assert q.current.name == "A"
+
+
+def test_wait_zero_disables_auto_skip(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.set_wait(0)
+    q.start()
+    assert q.confirm_deadline is None
+
+
+def test_person_without_telegram_is_not_auto_skipped(clock):
+    q = make_queue()
+    q.add("10:25", "Без ТГ")
+    q.start()
+    assert q.confirm_deadline is None
+
+
+def test_absent_button_rules(clock):
+    q = make_queue()
+    for uid in (1, 2, 3):
+        q.join(uid, f"U{uid}")
+    q.start()
+    with pytest.raises(QueueError, match="ще"):
+        q.absent(2, is_admin=False)  # одразу не можна — дай хвилину
+    clock.t += 60
+    with pytest.raises(QueueError, match="наступний у черзі"):
+        q.absent(3, is_admin=False)  # U3 не наступний
+    assert q.absent(2, is_admin=False).name == "U1"
+    assert q.current.name == "U2"
+
+
+def test_absent_not_allowed_after_confirm_but_admin_can(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    q.confirm(1)
+    clock.t += 600
+    with pytest.raises(QueueError, match="уже підтвердив"):
+        q.absent(2, is_admin=False)
+    q.absent(999, is_admin=True)
+    assert q.current.name == "B"
+
+
+def test_later_by_current_restarts_timer(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    q.confirm(1)
+    clock.t += 100
+    q.later(1)
+    assert q.current.name == "B"
+    assert not q.current.confirmed
+    assert q.confirm_deadline == clock.t + 180
+
+
+def test_skip_reported_in_turn_change(clock):
+    q = make_queue()
+    q.join(1, "A")
+    q.join(2, "B")
+    q.start()
+    q.pop_turn_change()
+    clock.t += 180
+    q.expire()
+    change = q.pop_turn_change()
+    assert change.skipped.name == "A"
+    assert change.current.name == "B"
 
 
 def test_here_when_not_skipped():

@@ -4,21 +4,35 @@
 нічого не знає про повідомлення, кнопки чи SQLite, тому його легко
 тестувати (див. tests/test_queue_logic.py).
 
-Головне правило черги: «наступний» — це перший за часом слот зі статусом
-WAITING. Усі операції лише змінюють статуси слотів, а після кожної зміни
-викликається `_advance()`, яка за потреби призначає нового поточного.
+Головне правило черги: `slots` — це список у порядку виклику, а «наступний» —
+перший слот у списку зі статусом WAITING. Спочатку порядок збігається з часом
+слотів, але пропущений студент, який повернувся, переїжджає далі по списку
+(разом зі своїм часом-міткою). Після кожної дії викликається `_advance()`,
+яка за потреби призначає нового поточного.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+DEFAULT_WAIT_MINUTES = 3  # скільки чекати на «🏃 Йду» до автопропуску
+ABSENT_GRACE_SECONDS = 60  # через скільки наступний може натиснути «Його немає»
+# Скільки людей пропустити вперед, коли пропущений повертається:
+# після 1-го пропуску — 1, після 2-го — 2, далі — в кінець черги.
+RETURN_PENALTY = {1: 1, 2: 2}
+
+
+def now() -> float:
+    """Поточний час. Окрема функція — щоб у тестах можна було «перемотати» час."""
+    return time.time()
 
 
 class SlotStatus(StrEnum):
     EMPTY = "empty"  # у слоті нікого немає
     WAITING = "waiting"  # записаний, чекає своєї черги
-    CURRENT = "current"  # зараз здає
+    CURRENT = "current"  # зараз його кличуть / він здає
     DONE = "done"  # здав ✅
     SKIPPED = "skipped"  # не прийшов, коли кликали
 
@@ -35,10 +49,13 @@ class QueueError(Exception):
 
 @dataclass
 class Slot:
-    time: str  # "10:25"
+    time: str  # "10:25" — мітка, на який час людина записалась
     user_id: int | None = None  # None — людина без Telegram (додана адміном)
     name: str | None = None
     status: SlotStatus = SlotStatus.EMPTY
+    skips: int = 0  # скільки разів людину вже пропускали
+    called_at: float | None = None  # коли покликали (для автопропуску)
+    confirmed: bool = False  # натиснув «🏃 Йду»
 
     @property
     def is_free(self) -> bool:
@@ -48,17 +65,29 @@ class Slot:
         self.user_id = user_id
         self.name = name
         self.status = SlotStatus.WAITING
+        self.skips = 0
+        self.called_at = None
+        self.confirmed = False
 
     def clear(self) -> None:
-        self.user_id = None
+        self.assign(None, "")
         self.name = None
         self.status = SlotStatus.EMPTY
+
+    def call(self) -> None:
+        """Зробити поточним: таймер підтвердження стартує заново."""
+        self.status = SlotStatus.CURRENT
+        self.called_at = now()
+        self.confirmed = False
 
 
 @dataclass(frozen=True)
 class TurnChange:
+    """Що сказати в чаті після дії."""
+
     current: Slot | None  # кого кликати (None — більше нікого)
     upcoming: Slot | None  # кого попередити «готуйся»
+    skipped: Slot | None = None  # кого щойно пропустили (якщо пропустили)
 
 
 @dataclass
@@ -69,10 +98,12 @@ class Queue:
     step: int  # крок між слотами у хвилинах (потрібен, щоб малювати перерви)
     slots: list[Slot]
     status: QueueStatus = QueueStatus.OPEN
+    wait_minutes: int = DEFAULT_WAIT_MINUTES  # 0 — автопропуск вимкнено
     message_id: int | None = None  # id закріпленого повідомлення
     id: int | None = None  # id у базі даних
     # Хто був поточним до останньої операції — щоб зрозуміти, кого кликати.
-    _last_called: tuple[int, int | None] | None = field(default=None, repr=False)
+    _last_called: tuple[str, int | None] | None = field(default=None, repr=False)
+    _last_skipped: Slot | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Пошук
@@ -118,6 +149,12 @@ class Queue:
         if self.status is QueueStatus.CLOSED:
             raise QueueError("Ця черга вже закрита.")
 
+    def _require_user(self, user_id: int) -> Slot:
+        slot = self.find_user(user_id)
+        if slot is None:
+            raise QueueError("Тебе немає в цій черзі.")
+        return slot
+
     # ------------------------------------------------------------------
     # Головний механізм: хто зараз здає
     # ------------------------------------------------------------------
@@ -128,7 +165,7 @@ class Queue:
             return
         nxt = self.upcoming
         if nxt is not None:
-            nxt.status = SlotStatus.CURRENT
+            nxt.call()
 
     def pop_turn_change(self) -> TurnChange | None:
         """Чи змінився поточний з минулого виклику.
@@ -139,16 +176,72 @@ class Queue:
           - TurnChange(current=None)   — кликати більше нікого.
         """
         cur = self.current
-        key = (self._index(cur), cur.user_id) if cur else None
-        if key == self._last_called:
+        key = (cur.time, cur.user_id) if cur else None
+        skipped, self._last_skipped = self._last_skipped, None
+        if key == self._last_called and skipped is None:
             return None
         self._last_called = key
-        return TurnChange(current=cur, upcoming=self.upcoming if cur else None)
+        return TurnChange(
+            current=cur, upcoming=self.upcoming if cur else None, skipped=skipped
+        )
 
     @property
     def is_finished(self) -> bool:
         """Черга запущена, але кликати більше нікого."""
         return self.status is QueueStatus.RUNNING and self.current is None
+
+    # ------------------------------------------------------------------
+    # Підтвердження і автопропуск
+    # ------------------------------------------------------------------
+
+    @property
+    def confirm_deadline(self) -> float | None:
+        """Коли пропустити поточного, якщо він не натисне «Йду» (None — не треба)."""
+        cur = self.current
+        if (
+            self.status is not QueueStatus.RUNNING
+            or cur is None
+            or cur.confirmed
+            or cur.user_id is None  # людина без Telegram не натисне «Йду»
+            or cur.called_at is None
+            or self.wait_minutes <= 0
+        ):
+            return None
+        return cur.called_at + self.wait_minutes * 60
+
+    def confirm(self, user_id: int) -> Slot:
+        """Поточний натиснув «🏃 Йду»."""
+        self._ensure_not_closed()
+        cur = self.current
+        if cur is None or cur.user_id != user_id:
+            raise QueueError("Зараз не твоя черга 🙂")
+        cur.confirmed = True
+        return cur
+
+    def expire(self) -> Slot | None:
+        """Автопропуск: якщо час на підтвердження вийшов — пропустити поточного."""
+        deadline = self.confirm_deadline
+        if deadline is None or now() < deadline:
+            return None
+        return self.skip()
+
+    def absent(self, user_id: int, is_admin: bool) -> Slot:
+        """Кнопка «🙅 Його немає»."""
+        self._ensure_not_closed()
+        cur = self.current
+        if cur is None:
+            raise QueueError("Зараз нікого не кличуть.")
+        if not is_admin:
+            if cur.confirmed:
+                raise QueueError(f"{cur.name} уже підтвердив, що йде — зачекай.")
+            upcoming = self.upcoming
+            if upcoming is None or upcoming.user_id != user_id:
+                raise QueueError("Відмітити відсутність може наступний у черзі або адмін.")
+            waited = now() - (cur.called_at or 0)
+            if waited < ABSENT_GRACE_SECONDS:
+                left = int(ABSENT_GRACE_SECONDS - waited) + 1
+                raise QueueError(f"Дай {cur.name} ще {left} с, щоб відгукнутись 🙂")
+        return self.skip()
 
     # ------------------------------------------------------------------
     # Дії студентів
@@ -203,28 +296,42 @@ class Queue:
         )
         if other is None:
             raise QueueError("Після тебе нікого немає — ти і так останній.")
-        mine.user_id, other.user_id = other.user_id, mine.user_id
-        mine.name, other.name = other.name, mine.name
+        for attr in ("user_id", "name", "skips"):
+            a, b = getattr(mine, attr), getattr(other, attr)
+            setattr(mine, attr, b)
+            setattr(other, attr, a)
+        if mine.status is SlotStatus.CURRENT:
+            mine.call()  # кличемо іншу людину — таймер з нуля
         return other, mine
 
     def here(self, user_id: int) -> Slot:
         """Пропущений студент повернувся.
 
-        Його слот раніше за поточний, тому щойно він знову WAITING —
-        він автоматично стає наступним.
+        Він стає в чергу не одразу, а пропускає вперед кількох людей:
+        після 1-го пропуску — 1, після 2-го — 2, далі — в кінець
+        (див. RETURN_PENALTY). Слот переїжджає в списку разом із часом-міткою.
         """
         self._ensure_not_closed()
         slot = self._require_user(user_id)
         if slot.status is not SlotStatus.SKIPPED:
             raise QueueError("Тебе не пропускали — просто чекай своєї черги.")
-        slot.status = SlotStatus.WAITING
-        self._advance()
-        return slot
 
-    def _require_user(self, user_id: int) -> Slot:
-        slot = self.find_user(user_id)
-        if slot is None:
-            raise QueueError("Тебе немає в цій черзі.")
+        self.slots.remove(slot)
+        slot.status = SlotStatus.WAITING
+        cursor = self._cursor()
+        future = range(cursor, len(self.slots))
+        waiting = [i for i in future if self.slots[i].status is SlotStatus.WAITING]
+        ahead = RETURN_PENALTY.get(slot.skips)
+
+        if ahead is None:  # третій і далі пропуск — у кінець
+            occupied = [i for i in future if not self.slots[i].is_free]
+            insert_at = occupied[-1] + 1 if occupied else cursor
+        elif waiting:
+            insert_at = waiting[min(ahead, len(waiting)) - 1] + 1
+        else:
+            insert_at = cursor
+        self.slots.insert(insert_at, slot)
+        self._advance()
         return slot
 
     # ------------------------------------------------------------------
@@ -276,8 +383,17 @@ class Queue:
         if slot is None:
             raise QueueError("Зараз нікого пропускати.")
         slot.status = SlotStatus.SKIPPED
+        slot.skips += 1
+        slot.called_at = None
+        self._last_skipped = slot
         self._advance()
         return slot
+
+    def set_wait(self, minutes: int) -> None:
+        self._ensure_not_closed()
+        if not 0 <= minutes <= 60:
+            raise QueueError("Час очікування — від 0 до 60 хвилин (0 — вимкнути автопропуск).")
+        self.wait_minutes = minutes
 
     def add(self, time: str, name: str) -> Slot:
         """Вписати людину без Telegram у конкретний слот."""
