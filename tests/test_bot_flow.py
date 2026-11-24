@@ -303,7 +303,7 @@ async def test_leave_needs_double_press_and_errors_disappear(env):
 async def test_break_and_numbers_flow(env, monkeypatch):
     clock = {"t": 1000.0}
     monkeypatch.setattr("bot.queue_logic.now", lambda: clock["t"])
-    await env.send(ADMIN, "/new Лаба перерва кожні 1 по 10")
+    await env.send(ADMIN, "/new Лаба перерва кожні 1")
     queue = env.storage.get((CHAT_ID, 0))
     await env.send(OLENA, "/join")
     await env.send(ADMIN, "/add Без Телеграму")
@@ -314,13 +314,16 @@ async def test_break_and_numbers_flow(env, monkeypatch):
     await env.send(ADMIN, "/go")
 
     await env.send(OLENA, "/done")
-    assert "☕ Перерва 10 хв" in env.session.texts()[-1]
-    clock["t"] += 600
-    await run_due_timer(env)
+    assert "☕ Перерва" in env.session.texts()[-1]
+    assert env.session.sent(SendMessage)[-1].reply_markup  # кнопки є і під час перерви
+    await env.send(OLENA, "/done")
+    assert queue.on_break  # чужий не може закінчити перерву
+    await env.send(ADMIN, "/done")
     assert "Без Телеграму</b>, твоя черга" in env.session.texts()[-1]
 
     await env.send(ADMIN, "/done 2")
     assert queue.on_break
     await env.send(ADMIN, "/breaks 0")
-    await env.send(ADMIN, "/go")  # закінчити перерву раніше
+    await env.press(ANDRII, f"q:done:{queue.id}", queue.message_id)  # наступний закінчує перерву
+    assert "Перерву закінчено" in last_answer(env.session).text
     assert queue.current.user_id == ANDRII.id

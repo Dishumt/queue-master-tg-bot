@@ -248,7 +248,7 @@ class QueueService:
         text = render_turn(queue, change)
         if text is None:
             return
-        keyboard = turn_keyboard(queue, change) if queue.current is not None else None
+        keyboard = turn_keyboard(queue, change) if queue.current or queue.on_break else None
         key = (queue.chat_id, queue.thread_id)
         lock = self._announce_locks.setdefault(key, asyncio.Lock())
 

@@ -101,9 +101,8 @@ class Queue:
     status: QueueStatus = QueueStatus.OPEN
     wait_minutes: int = DEFAULT_WAIT_MINUTES  # 0 — автопропуск вимкнено
     break_every: int = 0  # після скількох здач перерва (0 — без перерв)
-    break_minutes: int = 0
     turns: int = 0  # скільки здач було після останньої перерви
-    break_until: float | None = None  # до якого моменту триває перерва
+    on_break: bool = False  # перерва: нікого не кличемо, доки не натиснуть «Готово»
     message_id: int | None = None  # id закріпленого повідомлення
     id: int | None = None  # id у базі даних
     # Хто був поточним до останньої операції — щоб зрозуміти, кого кликати.
@@ -130,10 +129,6 @@ class Queue:
         """Хто піде наступним."""
         return next(iter(self.waiting), None)
 
-    @property
-    def on_break(self) -> bool:
-        return self.break_until is not None
-
     def find_user(self, user_id: int) -> Slot | None:
         return next((s for s in self.slots if s.user_id == user_id), None)
 
@@ -148,17 +143,9 @@ class Queue:
         before = self.slots[: self._index(slot)]
         return sum(s.status in (SlotStatus.CURRENT, SlotStatus.WAITING) for s in before)
 
-    def breaks_ahead(self, people: int) -> int:
-        """Скільки ще буде перерв, поки пройде стільки людей."""
-        return (self.turns + people) // self.break_every if self.break_every else 0
-
     def wait_seconds(self, slot: Slot) -> float:
-        """Орієнтовно скільки ще чекати цій людині."""
-        ahead = self.people_ahead(slot)
-        total = ahead * self.avg_turn() + self.breaks_ahead(ahead) * self.break_minutes * 60
-        if self.break_until is not None:
-            total += max(0.0, self.break_until - now())
-        return total
+        """Орієнтовно скільки ще чекати цій людині (без перерв — їхня довжина невідома)."""
+        return self.people_ahead(slot) * self.avg_turn()
 
     def avg_turn(self) -> float:
         """Середній час на людину (від виклику до «Готово»), у секундах."""
@@ -208,7 +195,7 @@ class Queue:
             self.turns = 0  # черга порожня — це вже відпочинок
         elif allow_break and self.break_every and self.turns >= self.break_every:
             self.turns = 0
-            self.break_until = now() + self.break_minutes * 60
+            self.on_break = True
         else:
             nxt.call()
 
@@ -228,7 +215,7 @@ class Queue:
         return TurnChange(current=cur, upcoming=self.upcoming, changed=changed, **events)
 
     # ------------------------------------------------------------------
-    # Таймери: автопропуск, нагадування, кінець перерви
+    # Таймери: автопропуск і нагадування
     # ------------------------------------------------------------------
 
     @property
@@ -264,7 +251,7 @@ class Queue:
     def next_timer_at(self) -> float | None:
         if self.status is not QueueStatus.RUNNING:
             return None
-        moments = (self.break_until, self.confirm_deadline, self.nudge_at)
+        moments = (self.confirm_deadline, self.nudge_at)
         return min((m for m in moments if m is not None), default=None)
 
     def expire(self) -> Slot | None:
@@ -276,10 +263,6 @@ class Queue:
 
     def tick(self) -> None:
         """Викликається таймером: робить те, чий час настав."""
-        if self.break_until is not None:
-            if now() >= self.break_until:
-                self._end_break()
-            return
         if self.expire() is not None:
             return
         nudge = self.nudge_at
@@ -287,8 +270,19 @@ class Queue:
             self.current.nudged = True
             self._pending_nudge = self.current
 
+    def _resume(self, user_id: int, is_admin: bool) -> Slot | None:
+        """«Готово» під час перерви: вона закінчилась, кличемо наступного."""
+        nxt = self.upcoming
+        is_next = nxt is not None and nxt.user_id == user_id
+        if not is_next and not is_admin:
+            raise QueueError("Зараз перерва ☕ Закінчити її може наступна людина або адмін.")
+        self._end_break()
+        if is_next:
+            nxt.confirmed = True  # натиснув сам — отже, вже тут
+        return nxt
+
     def _end_break(self) -> None:
-        self.break_until = None
+        self.on_break = False
         self._advance()
 
     # ------------------------------------------------------------------
@@ -372,7 +366,9 @@ class Queue:
         self._ensure_not_closed()
         cur = self.current
         if cur is None:
-            raise QueueError("Зараз перерва ☕" if self.on_break else "Зараз нікого не кличуть.")
+            if self.on_break:
+                return Entered.CONFIRMED, self._resume(user_id, is_admin)
+            raise QueueError("Зараз нікого не кличуть.")
         if cur.user_id is not None and cur.user_id == user_id:
             cur.confirmed = True
             return Entered.CONFIRMED, cur
@@ -442,8 +438,8 @@ class Queue:
         slot.called_at = None
         self._last_skipped = slot
 
-    def finish(self, user_id: int, is_admin: bool, number: int | None = None) -> Slot:
-        """Позначити здачу: поточного або (адмін) людину за номером."""
+    def finish(self, user_id: int, is_admin: bool, number: int | None = None) -> Slot | None:
+        """Позначити здачу (поточного або за номером), а під час перерви — закінчити її."""
         self._ensure_not_closed()
         if number is not None:
             if not is_admin:
@@ -453,6 +449,8 @@ class Queue:
                 raise QueueError(f"Номер {number} вже відмічено ✅")
         else:
             slot = self.current
+            if slot is None and self.on_break:
+                return self._resume(user_id, is_admin)
             if slot is None:
                 if self.status is QueueStatus.OPEN:
                     raise QueueError("Черга ще не запущена.")
@@ -493,9 +491,9 @@ class Queue:
         self._ensure_not_closed()
         self.wait_minutes = minutes
 
-    def set_breaks(self, every: int, minutes: int) -> None:
+    def set_breaks(self, every: int) -> None:
         self._ensure_not_closed()
-        self.break_every, self.break_minutes = every, minutes
+        self.break_every = every
 
     def add(self, name: str) -> Slot:
         """Дописати в кінець людину без Telegram."""
@@ -512,4 +510,4 @@ class Queue:
     def close(self) -> None:
         self._ensure_not_closed()
         self.status = QueueStatus.CLOSED
-        self.break_until = None
+        self.on_break = False

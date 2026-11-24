@@ -109,7 +109,7 @@ def render_queue(queue: Queue) -> str:
             # Лінія там, де буде перерва (після останнього її не буває).
             if queue.break_every and turns >= queue.break_every and slot is not last_waiting:
                 if last_waiting is not None and queue.status is not QueueStatus.CLOSED:
-                    lines.append(f"<i>── ☕ перерва {queue.break_minutes} хв ──</i>")
+                    lines.append("<i>── ☕ перерва ──</i>")
                 turns = 0
 
     if queue.status is not QueueStatus.CLOSED:
@@ -181,9 +181,12 @@ def render_turn(queue: Queue, change: TurnChange) -> str | None:
             if change.upcoming is not None:
                 lines.append(f"⏳ {mention(change.upcoming)}, готуйся — далі ти.")
         elif queue.on_break:
-            lines.append(f"☕ Перерва {queue.break_minutes} хв.")
+            lines.append("☕ Перерва. Нікого не кличу.")
             if change.upcoming is not None:
-                lines.append(f"⏳ {mention(change.upcoming)}, після перерви — ти.")
+                lines.append(
+                    f"⏳ {mention(change.upcoming)}, далі ти. "
+                    f"Коли перерва закінчиться — натисни «{BTN_DONE}»."
+                )
         elif queue.status is QueueStatus.RUNNING:
             lines.append("🎉 Більше нікого в черзі! Можна дописатися — бот покличе.")
 

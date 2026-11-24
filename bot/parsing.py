@@ -1,8 +1,8 @@
 """Розбір тексту команд.
 
-Приклад: `/new Лаба 3 перерва кожні 5 по 10 чекати 3`
+Приклад: `/new Лаба 3 перерва кожні 5 чекати 3`
   - «Лаба 3»                — назва (усе до слова «перерва» чи «чекати»)
-  - «перерва кожні 5 по 10» — після кожних 5 здач перерва 10 хв
+  - «перерва кожні 5»       — після кожних 5 здач черга стоїть до «Готово»
   - «чекати 3»              — скільки хвилин чекати на «🏃 Йду» (0 — без автопропуску)
 """
 
@@ -19,15 +19,15 @@ _TIME_RE = re.compile(r"\d{1,2}:\d{2}")
 _NUMBER_RE = re.compile(r"^(\d{1,3})(?:хв|хвилин|m|min)?$", re.IGNORECASE)
 _BREAK_WORDS = {"перерва", "перерви", "break"}
 _WAIT_WORDS = {"чекати", "очікування", "wait"}
-# Слова для зручності: «перерва кожні 5 учасників по 10 хв».
+# Слова для зручності: «перерва кожні 5 учасників».
 _FILLERS = {
-    "кожні", "кожних", "через", "після", "по", "на", "хв", "хвилин",
+    "кожні", "кожних", "через", "після",
     "учасників", "учасники", "людей", "людини", "студентів", "студенти",
 }  # fmt: skip
 
 NEW_USAGE = (
-    "Формат: <code>/new Назва перерва кожні 5 по 10 чекати 3</code>\n"
-    "• перерва — після кожних 5 здач 10 хв (необов'язково)\n"
+    "Формат: <code>/new Назва перерва кожні 5 чекати 3</code>\n"
+    "• перерва — після кожних 5 здач, до «Готово» (необов'язково)\n"
     f"• чекати — скільки хвилин чекати на «🏃 Йду» (за замовчуванням {DEFAULT_WAIT_MINUTES}, 0 — без автопропуску)"
 )
 
@@ -57,29 +57,25 @@ def parse_wait(text: str) -> int:
     return minutes
 
 
-def parse_break(text: str) -> tuple[int, int]:
-    """'кожні 5 по 10' або '5 10' -> (5, 10). '0' -> (0, 0), тобто без перерв."""
+def parse_break(text: str) -> int:
+    """'кожні 5' або '5' -> 5. '0' -> 0, тобто без перерв."""
     numbers = []
     for token in text.lower().split():
-        if m := _NUMBER_RE.match(token):
-            numbers.append(int(m.group(1)))
+        if token.isascii() and token.isdigit():
+            numbers.append(int(token))
         elif token not in _FILLERS:
-            raise QueueError(f"Не зрозумів «{token}». Приклад: перерва кожні 5 по 10")
-    if numbers == [0]:
-        return 0, 0
-    if len(numbers) != 2:
-        raise QueueError("Для перерви потрібні два числа, наприклад: перерва кожні 5 по 10")
-    every, minutes = numbers
-    if not 1 <= every <= MAX_PEOPLE or not 1 <= minutes <= 180:
-        raise QueueError(f"Перерва: від 1 до {MAX_PEOPLE} людей і від 1 до 180 хвилин.")
-    return every, minutes
+            raise QueueError(f"Не зрозумів «{token}». Приклад: перерва кожні 5")
+    if len(numbers) != 1:
+        raise QueueError("Для перерви потрібне одне число, наприклад: перерва кожні 5")
+    if numbers[0] > MAX_PEOPLE:
+        raise QueueError(f"Перерва: від 1 до {MAX_PEOPLE} людей (0 — без перерв).")
+    return numbers[0]
 
 
 @dataclass
 class NewQueueArgs:
     title: str
     break_every: int = 0
-    break_minutes: int = 0
     wait: int = DEFAULT_WAIT_MINUTES
 
 
@@ -106,7 +102,7 @@ def parse_new_args(text: str) -> NewQueueArgs:
 
     args = NewQueueArgs(title=title[:100])
     if "break" in parts:
-        args.break_every, args.break_minutes = parse_break(" ".join(parts["break"]))
+        args.break_every = parse_break(" ".join(parts["break"]))
     if "wait" in parts:
         args.wait = parse_wait(" ".join(parts["wait"]))
     return args

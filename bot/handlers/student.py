@@ -94,8 +94,9 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
                 show_alert=True,
             )
         case "done":
+            was_break = service.get(key, queue_id).on_break
             await _finish(service, admins, key, cb, user, queue_id)
-            await cb.answer("✅ Здачу відмічено. Молодець!")
+            await cb.answer("☕ Перерву закінчено" if was_break else "✅ Здачу відмічено. Молодець!")
         case "enter":
             outcome = await _enter(service, admins, key, cb, user, queue_id)
             await cb.answer(ENTER_ANSWERS[outcome].format(done=BTN_DONE))

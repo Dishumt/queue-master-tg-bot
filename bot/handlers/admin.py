@@ -29,7 +29,6 @@ async def cmd_new(message: Message, command: CommandObject, service: QueueServic
         title=args.title,
         wait_minutes=args.wait,
         break_every=args.break_every,
-        break_minutes=args.break_minutes,
     )
     await service.create(queue, created_by=message.from_user.id if message.from_user else 0)
 
@@ -66,9 +65,9 @@ async def cmd_wait(message: Message, command: CommandObject, service: QueueServi
 async def cmd_breaks(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
     if not command.args:
-        raise QueueError("Формат: /breaks 5 10 — після кожних 5 здач 10 хв (0 — без перерв)")
-    every, minutes = parse_break(command.args)
-    await service.apply(key_of(message), lambda q: q.set_breaks(every, minutes))
+        raise QueueError("Формат: /breaks 5 — перерва після кожних 5 здач (0 — без перерв)")
+    every = parse_break(command.args)
+    await service.apply(key_of(message), lambda q: q.set_breaks(every))
     await ok(message)
 
 

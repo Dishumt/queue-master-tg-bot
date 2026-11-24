@@ -33,7 +33,7 @@ GROUP_COMMANDS = [
     BotCommand(command="go", description="[адмін] Почати приймати / закінчити перерву"),
     BotCommand(command="skip", description="[адмін] Поточний не прийшов"),
     BotCommand(command="wait", description="[адмін] Скільки хвилин чекати на «Йду»"),
-    BotCommand(command="breaks", description="[адмін] Перерви: /breaks 5 10"),
+    BotCommand(command="breaks", description="[адмін] Перерви: /breaks 5"),
     BotCommand(command="repost", description="[адмін] Переслати чергу вниз"),
     BotCommand(command="close", description="[адмін] Закрити чергу"),
 ]

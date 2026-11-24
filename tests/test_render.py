@@ -37,7 +37,7 @@ def test_render_queue(make):
 
 
 def test_render_breaks(make):
-    q = make(5, break_every=2, break_minutes=10)
+    q = make(5, break_every=2)
     lines = render_queue(q).split("\n")
     before = [lines[i - 1] for i, line in enumerate(lines) if "── ☕" in line]
     assert ["U2" in before[0], "U4" in before[1], len(before)] == [True, True, 2]
@@ -48,14 +48,14 @@ def test_render_breaks(make):
     assert "☕ Перерва · здали 2 з 5" in text
     assert text.count("── ☕") == 1  # лишилась тільки майбутня, після U4
     # Після останнього перерви не буває.
-    last = make(2, break_every=2, break_minutes=10)
+    last = make(2, break_every=2)
     assert "── ☕" not in render_queue(last)
     last.start()
     assert "── ☕" not in render_queue(last)
 
 
 def test_long_queue_fits_telegram_limit(make):
-    q = make(break_every=1, break_minutes=180)
+    q = make(break_every=1)
     for i in range(MAX_PEOPLE):
         q.join(i, "Я" * 40)
     q.start()
@@ -108,11 +108,11 @@ def test_turn_messages(make, clock):
 
 
 def test_break_message(make):
-    q = make(2, start=True, break_every=1, break_minutes=10)
+    q = make(2, start=True, break_every=1)
     q.pop_turn_change()
     q.finish(1, False)
     text = render_turn(q, q.pop_turn_change())
-    assert "☕ Перерва 10 хв" in text and "U2</a>, після перерви — ти." in text
+    assert "☕ Перерва" in text and "U2</a>, далі ти" in text and "✅ Готово" in text
 
 
 def test_position(make, clock):

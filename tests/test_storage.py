@@ -15,7 +15,7 @@ async def test_queue_survives_restart(tmp_path, make):
     path = str(tmp_path / "q.db")
     storage = Storage(path)
     await storage.open()
-    q = make(wait_minutes=4, break_every=2, break_minutes=10)
+    q = make(wait_minutes=4, break_every=2)
     await storage.create(q, created_by=1)
     for uid in (1, 2, 3, 4):  # люди додаються вже після створення
         q.join(uid, f"U{uid}")
@@ -34,7 +34,7 @@ async def test_queue_survives_restart(tmp_path, make):
     assert [s.name for s in loaded.slots] == ["U2", "U3", "U1"]
     assert loaded.slots == q.slots
     assert (loaded.status, loaded.message_id) == (QueueStatus.RUNNING, 777)
-    assert (loaded.wait_minutes, loaded.break_every, loaded.break_minutes) == (4, 2, 10)
+    assert (loaded.wait_minutes, loaded.break_every) == (4, 2)
     assert loaded.pop_turn_change() is None  # поточного вже кликали
     assert storage.get_name(1) == "Коваленко Олена"
 
@@ -43,7 +43,7 @@ async def test_queue_survives_restart(tmp_path, make):
     assert loaded.on_break
     await storage.save(loaded)
     storage = await reopen(storage, path)
-    assert storage.get((1, 0)).break_until == loaded.break_until  # перерва теж триває
+    assert storage.get((1, 0)).on_break  # перерва теж триває
     await storage.close()
 
 

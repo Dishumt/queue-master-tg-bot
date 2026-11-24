@@ -31,9 +31,8 @@ CREATE TABLE IF NOT EXISTS queues (
     status      TEXT    NOT NULL,
     wait_minutes INTEGER NOT NULL DEFAULT 3,
     break_every INTEGER NOT NULL DEFAULT 0,
-    break_minutes INTEGER NOT NULL DEFAULT 0,
     turns       INTEGER NOT NULL DEFAULT 0,
-    break_until REAL,
+    on_break    INTEGER NOT NULL DEFAULT 0,
     message_id  INTEGER,
     created_by  INTEGER,
     created_at  INTEGER NOT NULL
@@ -68,9 +67,8 @@ _ADDED_COLUMNS = {
     "queues": {
         "wait_minutes": "INTEGER NOT NULL DEFAULT 3",
         "break_every": "INTEGER NOT NULL DEFAULT 0",
-        "break_minutes": "INTEGER NOT NULL DEFAULT 0",
         "turns": "INTEGER NOT NULL DEFAULT 0",
-        "break_until": "REAL",
+        "on_break": "INTEGER NOT NULL DEFAULT 0",
     },
     "slots": {
         "skips": "INTEGER NOT NULL DEFAULT 0",
@@ -82,8 +80,8 @@ _ADDED_COLUMNS = {
     },
 }
 
-# Колонки з версії, де слоти були прив'язані до часу. Тепер є тільки порядок.
-_REMOVED_COLUMNS = {"queues": ["step"], "slots": ["time"]}
+# Колонки старих версій, де були час слотів і довжина перерви.
+_REMOVED_COLUMNS = {"queues": ["step", "break_minutes", "break_until"], "slots": ["time"]}
 
 # Поля слота в тому порядку, в якому вони читаються і пишуться.
 # Додаєш поле в Slot — додай його сюди, у _slot_row/_slot_from_row і в схему вище.
@@ -95,8 +93,8 @@ _SLOT_COLUMNS = ", ".join(_SLOT_FIELDS)
 
 # Поля черги, які змінюються після створення.
 _QUEUE_FIELDS = (
-    "status", "wait_minutes", "break_every", "break_minutes",
-    "turns", "break_until", "message_id",
+    "status", "wait_minutes", "break_every",
+    "turns", "on_break", "message_id",
 )  # fmt: skip
 
 
@@ -200,6 +198,7 @@ class Storage:
                 slots = [_slot_from_row(row) for row in await cur.fetchall()]
             fields = dict(zip(_QUEUE_FIELDS, values))
             fields["status"] = QueueStatus(fields["status"])
+            fields["on_break"] = bool(fields["on_break"])
             queue = Queue(
                 id=qid, chat_id=chat_id, thread_id=thread_id, title=title, slots=slots, **fields
             )

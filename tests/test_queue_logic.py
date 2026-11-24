@@ -225,36 +225,42 @@ def test_enter_by_current_and_admin(make):
 
 
 def test_break_after_every_n(make, clock):
-    q = make(5, start=True, break_every=2, break_minutes=10)
+    q = make(6, start=True, break_every=2)
     q.finish(1, False)
     assert q.current.name == "U2"  # ще рано
     q.finish(2, False)
-    assert q.on_break and q.current is None  # під час перерви нікого не кличемо
-    assert q.next_timer_at == clock.t + 600
-    q.join(6, "U6")
-    assert q.current is None
+    assert q.on_break and q.current is None and q.next_timer_at is None
+    clock.t += 3600
+    q.tick()
+    q.join(7, "U7")
+    assert q.current is None  # сама перерва не закінчується
     with pytest.raises(QueueError, match="перерва"):
-        q.enter(3, False)
-    clock.t += 599
-    q.tick()
-    assert q.current is None
-    clock.t += 1
-    q.tick()
-    assert q.current.name == "U3" and not q.on_break
+        q.finish(4, False)
+    q.finish(3, False)  # наступний каже «Готово» — перерва закінчилась
+    assert q.current.name == "U3" and q.current.confirmed and not q.on_break
     q.finish(3, False)
     q.finish(4, False)
     assert q.on_break  # лік почався заново
+    q.finish(ADMIN, True)
+    assert q.current.name == "U5" and not q.current.confirmed
+
+
+def test_enter_ends_break(make):
+    q = make(2, start=True, break_every=1)
+    q.finish(1, False)
+    q.enter(2, False)
+    assert q.current.name == "U2" and q.current.confirmed
 
 
 def test_go_ends_break_early(make):
-    q = make(2, start=True, break_every=1, break_minutes=10)
+    q = make(2, start=True, break_every=1)
     q.finish(1, False)
     q.start()
     assert q.current.name == "U2" and not q.on_break
 
 
 def test_skipped_do_not_count_and_no_break_after_last(make):
-    q = make(3, start=True, break_every=2, break_minutes=10)
+    q = make(3, start=True, break_every=2)
     q.skip()
     q.finish(2, False)
     assert q.current.name == "U3"
@@ -265,7 +271,7 @@ def test_skipped_do_not_count_and_no_break_after_last(make):
 
 
 def test_enter_postpones_break(make, clock):
-    q = make(3, start=True, break_every=1, break_minutes=10)
+    q = make(3, start=True, break_every=1)
     q.confirm(1)
     clock.t += 300
     q.enter(2, False)  # U2 вже в кабінеті
@@ -274,14 +280,14 @@ def test_enter_postpones_break(make, clock):
     assert q.on_break
 
 
-def test_break_survives_everyone_leaving(make, clock):
-    q = make(2, start=True, break_every=1, break_minutes=10)
+def test_break_with_nobody_left(make):
+    q = make(2, start=True, break_every=1)
     q.finish(1, False)
     q.leave(2)
-    clock.t += 600
-    q.tick()
-    assert not q.on_break and q.next_timer_at is None
-    q.close()
+    q.join(3, "U3")
+    assert q.on_break
+    q.finish(3, False)
+    assert q.current.name == "U3"
 
 
 # ---------------------------------------------------------------- нагадування, очікування
@@ -303,15 +309,14 @@ def test_nudge_once(make, clock):
 
 
 def test_wait_estimate(make, clock):
-    q = make(4, start=True, break_every=2, break_minutes=10)
-    assert q.wait_seconds(q.find_user(4)) == 3 * 300 + 600  # 3 людини і 1 перерва
+    q = make(4, start=True)
+    assert q.wait_seconds(q.find_user(4)) == 3 * 300
     clock.t += 240
     q.finish(1, False)
-    assert q.avg_turn() == 240
     clock.t += 360
     q.finish(2, False)
     assert q.avg_turn() == 300
-    assert q.wait_seconds(q.find_user(4)) == 300 + 600  # U3 і решта перерви
+    assert q.wait_seconds(q.find_user(4)) == 300
 
 
 def test_pop_turn_change_reports_each_change_once(make):
