@@ -74,7 +74,11 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
                 ahead = service.get(key, queue_id).people_ahead(slot)
                 await cb.answer(f"🙋 З поверненням! Перед тобою {people(ahead)}.")
             else:
-                await cb.answer(f"✋ Тебе записано. Перед тобою {people(service.get(key, queue_id).people_ahead(slot))}.")
+                await cb.answer(f"✋ Твоє місце — {slot.place}. Перед тобою {people(service.get(key, queue_id).people_ahead(slot))}.")
+        case _ if action.startswith("p"):  # кнопка з номером місця
+            name, place = display_name(service, user), int(action[1:])
+            slot = await service.apply(key, lambda q: q.join(user.id, name, place), queue_id)
+            await cb.answer(f"✋ Твоє місце — {slot.place}")
         case "here":
             slot = await service.apply(key, lambda q: q.here(user.id), queue_id)
             ahead = service.get(key, queue_id).people_ahead(slot)
@@ -111,10 +115,14 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
 
 
 @router.message(Command("join"))
-async def cmd_join(message: Message, service: QueueService):
+async def cmd_join(message: Message, command: CommandObject, service: QueueService):
     user = message.from_user
     name = display_name(service, user)
-    await service.apply(key_of(message), lambda q: q.sign_up(user.id, name))
+    if command.args:  # /join 10 — конкретне місце
+        place = parse_number(command.args)
+        await service.apply(key_of(message), lambda q: q.join(user.id, name, place))
+    else:
+        await service.apply(key_of(message), lambda q: q.sign_up(user.id, name))
     await ok(message)
 
 
@@ -143,7 +151,7 @@ async def cmd_here(message: Message, service: QueueService):
 async def cmd_done(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     user = message.from_user
     key = key_of(message)
-    if command.args:  # /done 3 — адмін відмічає людину за номером
+    if command.args:  # /done 3 — адмін відмічає людину за місцем
         await require_admin(message, admins)
         number = parse_number(command.args)
         await service.apply(key, lambda q: q.finish(user.id, True, number))

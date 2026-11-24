@@ -34,7 +34,7 @@ async def test_queue_survives_restart(tmp_path, make):
     assert [s.name for s in loaded.slots] == ["U2", "U3", "U1"]
     assert loaded.slots == q.slots
     assert (loaded.status, loaded.message_id) == (QueueStatus.RUNNING, 777)
-    assert (loaded.wait_minutes, loaded.break_every) == (4, 2)
+    assert (loaded.wait_minutes, loaded.break_every, loaded.places) == (4, 2, 50)
     assert loaded.pop_turn_change() is None  # поточного вже кликали
     assert storage.get_name(1) == "Коваленко Олена"
 
@@ -82,6 +82,7 @@ async def test_migrates_database_with_time_slots(tmp_path, make):
     await storage.open()
     q = storage.get((5, 0))
     assert [s.name for s in q.slots] == ["A"]  # порожні слоти зникли
+    assert q.slots[0].place == 1 and q.places == 30  # місця роздано по порядку
     q.join(8, "B")
     await storage.save(q)
     await storage.create(make(1), created_by=1)  # нові черги теж записуються

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS queues (
     title       TEXT    NOT NULL,
     status      TEXT    NOT NULL,
     wait_minutes INTEGER NOT NULL DEFAULT 3,
+    places      INTEGER NOT NULL DEFAULT 30,
     break_every INTEGER NOT NULL DEFAULT 0,
     turns       INTEGER NOT NULL DEFAULT 0,
     on_break    INTEGER NOT NULL DEFAULT 0,
@@ -42,6 +43,7 @@ CREATE INDEX IF NOT EXISTS queues_status ON queues(status);
 CREATE TABLE IF NOT EXISTS slots (
     queue_id  INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
     position  INTEGER NOT NULL,
+    place     INTEGER NOT NULL DEFAULT 0,
     user_id   INTEGER,
     name      TEXT,
     status    TEXT    NOT NULL,
@@ -66,11 +68,13 @@ CREATE TABLE IF NOT EXISTS users (
 _ADDED_COLUMNS = {
     "queues": {
         "wait_minutes": "INTEGER NOT NULL DEFAULT 3",
+        "places": "INTEGER NOT NULL DEFAULT 30",
         "break_every": "INTEGER NOT NULL DEFAULT 0",
         "turns": "INTEGER NOT NULL DEFAULT 0",
         "on_break": "INTEGER NOT NULL DEFAULT 0",
     },
     "slots": {
+        "place": "INTEGER NOT NULL DEFAULT 0",
         "skips": "INTEGER NOT NULL DEFAULT 0",
         "called_at": "REAL",
         "confirmed": "INTEGER NOT NULL DEFAULT 0",
@@ -86,14 +90,14 @@ _REMOVED_COLUMNS = {"queues": ["step", "break_minutes", "break_until"], "slots":
 # Поля слота в тому порядку, в якому вони читаються і пишуться.
 # Додаєш поле в Slot — додай його сюди, у _slot_row/_slot_from_row і в схему вище.
 _SLOT_FIELDS = (
-    "user_id", "name", "status", "skips",
+    "user_id", "name", "place", "status", "skips",
     "called_at", "confirmed", "done_at", "nudged", "auto_done",
 )  # fmt: skip
 _SLOT_COLUMNS = ", ".join(_SLOT_FIELDS)
 
 # Поля черги, які змінюються після створення.
 _QUEUE_FIELDS = (
-    "status", "wait_minutes", "break_every",
+    "status", "wait_minutes", "places", "break_every",
     "turns", "on_break", "message_id",
 )  # fmt: skip
 
@@ -106,6 +110,7 @@ def _slot_row(slot: Slot) -> tuple:
     return (
         slot.user_id,
         slot.name,
+        slot.place,
         slot.status.value,
         slot.skips,
         slot.called_at,
@@ -117,10 +122,11 @@ def _slot_row(slot: Slot) -> tuple:
 
 
 def _slot_from_row(row: tuple) -> Slot:
-    user_id, name, status, skips, called_at, confirmed, done_at, nudged, auto_done = row
+    user_id, name, place, status, skips, called_at, confirmed, done_at, nudged, auto_done = row
     return Slot(
         user_id=user_id,
         name=name or "",
+        place=place,
         status=SlotStatus(status),
         skips=skips,
         called_at=called_at,
@@ -202,6 +208,10 @@ class Storage:
             queue = Queue(
                 id=qid, chat_id=chat_id, thread_id=thread_id, title=title, slots=slots, **fields
             )
+            if any(s.place == 0 for s in slots):  # черга зі старої версії, без місць
+                for place, slot in enumerate(slots, start=1):
+                    slot.place = place
+                queue.places = max(queue.places, len(slots))
             queue.pop_turn_change()  # поточного вже кликали до перезапуску
             self._queues[(chat_id, thread_id)] = queue  # новіша перезапише старішу
 

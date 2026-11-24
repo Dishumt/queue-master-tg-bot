@@ -7,6 +7,7 @@ from bot.queue_logic import QueueError
 def test_new_args():
     assert parse_new_args("Лаба 3") == NewQueueArgs("Лаба 3")
     full = NewQueueArgs("Лаба 3", break_every=5, wait=2)
+    assert parse_new_args("Лаба 3 місць 25 перерва 5").places == 25
     for text in (
         "Лаба 3 перерва кожні 5 чекати 2",
         "Лаба 3 чекати 2 перерва 5",
@@ -26,6 +27,8 @@ def test_new_args():
         ("X перерва 5 10", "одне число"),
         ("X перерва 999", "від 1 до"),
         ("X перерва щось", "Не зрозумів"),
+        ("X місць", "не номер"),
+        ("X місць 99", "від 1 до 50"),
         ("X чекати", "від 0 до 60"),
         ("X чекати 99", "від 0 до 60"),
     ],

@@ -20,7 +20,7 @@ def make():
     """make(3) — черга з людьми U1, U2, U3 (user_id 1, 2, 3)."""
 
     def build(people: int = 0, start: bool = False, **kwargs) -> Queue:
-        q = Queue(chat_id=1, thread_id=0, title="Лаба <3>", id=7, **kwargs)
+        q = Queue(chat_id=1, thread_id=0, title="Лаба <3>", id=7, **{"places": 50, **kwargs})
         for uid in range(1, people + 1):
             q.join(uid, f"U{uid}")
         if start:

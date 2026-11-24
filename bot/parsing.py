@@ -1,7 +1,8 @@
 """Розбір тексту команд.
 
-Приклад: `/new Лаба 3 перерва кожні 5 чекати 3`
-  - «Лаба 3»                — назва (усе до слова «перерва» чи «чекати»)
+Приклад: `/new Лаба 3 місць 30 перерва кожні 5 чекати 3`
+  - «Лаба 3»                — назва (усе до слів «місць», «перерва», «чекати»)
+  - «місць 30»              — скільки всього місць (за замовчуванням 30)
   - «перерва кожні 5»       — після кожних 5 здач черга стоїть до «Готово»
   - «чекати 3»              — скільки хвилин чекати на «🏃 Йду» (0 — без автопропуску)
 """
@@ -11,12 +12,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from bot.queue_logic import DEFAULT_WAIT_MINUTES, MAX_PEOPLE, QueueError
+from bot.queue_logic import DEFAULT_PLACES, DEFAULT_WAIT_MINUTES, MAX_PEOPLE, QueueError
 
 MAX_NAME_LEN = 40
 
 _TIME_RE = re.compile(r"\d{1,2}:\d{2}")
 _NUMBER_RE = re.compile(r"^(\d{1,3})(?:хв|хвилин|m|min)?$", re.IGNORECASE)
+_PLACES_WORDS = {"місць", "місця", "places"}
 _BREAK_WORDS = {"перерва", "перерви", "break"}
 _WAIT_WORDS = {"чекати", "очікування", "wait"}
 # Слова для зручності: «перерва кожні 5 учасників».
@@ -26,7 +28,8 @@ _FILLERS = {
 }  # fmt: skip
 
 NEW_USAGE = (
-    "Формат: <code>/new Назва перерва кожні 5 чекати 3</code>\n"
+    "Формат: <code>/new Назва місць 30 перерва кожні 5 чекати 3</code>\n"
+    f"• місць — скільки місць (за замовчуванням {DEFAULT_PLACES})\n"
     "• перерва — після кожних 5 здач, до «Готово» (необов'язково)\n"
     f"• чекати — скільки хвилин чекати на «🏃 Йду» (за замовчуванням {DEFAULT_WAIT_MINUTES}, 0 — без автопропуску)"
 )
@@ -44,7 +47,7 @@ def parse_number(text: str) -> int:
     """Номер людини у списку: '3' -> 3."""
     text = text.strip()
     if not (text.isascii() and text.isdigit()):
-        raise QueueError(f"«{text}» — не номер. Вкажи номер зі списку, наприклад 3")
+        raise QueueError(f"«{text}» — не номер. Вкажи місце, наприклад 3")
     return int(text)
 
 
@@ -75,6 +78,7 @@ def parse_break(text: str) -> int:
 @dataclass
 class NewQueueArgs:
     title: str
+    places: int = DEFAULT_PLACES
     break_every: int = 0
     wait: int = DEFAULT_WAIT_MINUTES
 
@@ -85,7 +89,10 @@ def parse_new_args(text: str) -> NewQueueArgs:
     mode = "title"
     for token in (text or "").split():
         word = token.lower()
-        if word in _BREAK_WORDS:
+        if word in _PLACES_WORDS:
+            mode = "places"
+            parts.setdefault(mode, [])
+        elif word in _BREAK_WORDS:
             mode = "break"
             parts.setdefault(mode, [])
         elif word in _WAIT_WORDS:
@@ -101,6 +108,10 @@ def parse_new_args(text: str) -> NewQueueArgs:
         raise QueueError("Час більше не потрібен — черга йде за номерами.\n\n" + NEW_USAGE)
 
     args = NewQueueArgs(title=title[:100])
+    if "places" in parts:
+        args.places = parse_number(" ".join(parts["places"]))
+        if not 1 <= args.places <= MAX_PEOPLE:
+            raise QueueError(f"Місць може бути від 1 до {MAX_PEOPLE}.")
     if "break" in parts:
         args.break_every = parse_break(" ".join(parts["break"]))
     if "wait" in parts:

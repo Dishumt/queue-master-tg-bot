@@ -17,13 +17,13 @@ def test_join_goes_to_the_end(make):
     q = make(2)
     q.join(3, "U3")
     assert order(q) == ["U1", "U2", "U3"]
-    with pytest.raises(QueueError, match="номер 3"):
+    with pytest.raises(QueueError, match="місце 3"):
         q.join(3, "U3")
 
 
 def test_queue_has_a_limit(make):
-    q = make(MAX_PEOPLE)
-    with pytest.raises(QueueError, match="не влізе"):
+    q = make(MAX_PEOPLE, places=MAX_PEOPLE)
+    with pytest.raises(QueueError, match="не лишилось"):
         q.join(1000, "X")
 
 
@@ -75,13 +75,13 @@ def test_only_current_or_admin_can_finish(make):
     assert q.current.name == "U2"
 
 
-def test_admin_marks_by_number(make):
+def test_admin_marks_by_place(make):
     q = make(3, start=True)
     with pytest.raises(QueueError, match="тільки адмін"):
         q.finish(1, False, 2)
     q.finish(ADMIN, True, 2)
     assert order(q) == ["U1", "U3"]
-    for number, error in ((2, "вже відмічено"), (0, "немає"), (9, "немає")):
+    for number, error in ((2, "вже відмічено"), (0, "нікого"), (9, "нікого")):
         with pytest.raises(QueueError, match=error):
             q.finish(ADMIN, True, number)
 
@@ -331,3 +331,82 @@ def test_pop_turn_change_reports_each_change_once(make):
     q.finish(2, False)
     assert q.pop_turn_change().current is None
     assert q.pop_turn_change() is None
+
+
+# ---------------------------------------------------------------- місця
+
+
+def places(q: Queue) -> list[int]:
+    return [s.place for s in q.slots]
+
+
+def test_pick_place_and_skip_gaps(make):
+    q = make(places=30)
+    q.join(1, "A", 15)
+    q.join(2, "B", 10)
+    q.join(3, "C")  # без номера — найближче вільне
+    assert (order(q), places(q)) == (["C", "B", "A"], [1, 10, 15])
+    for place, error in ((10, "зайняте"), (0, "від 1 до 30"), (31, "від 1 до 30")):
+        with pytest.raises(QueueError, match=error):
+            q.join(4, "D", place)
+    q.start()
+    q.finish(3, False)
+    assert q.current.name == "B"  # місця 2–9 порожні — пропустили
+    with pytest.raises(QueueError, match="минуло"):
+        q.join(4, "D", 5)
+    q.join(4, "D")
+    assert places(q) == [1, 10, 11, 15]
+
+
+def test_move_to_another_place(make):
+    q = make(3)
+    q.join(1, "U1", 20)
+    assert (order(q), places(q)) == (["U2", "U3", "U1"], [2, 3, 20])
+    q.start()
+    with pytest.raises(QueueError, match="Пізніше"):
+        q.join(2, "U2", 25)
+    q.skip()
+    q.here(2)
+    with pytest.raises(QueueError, match="Після пропуску"):
+        q.join(2, "U2", 25)
+
+
+def test_latecomer_gets_passed_gap_but_goes_last(make):
+    q = make(places=3)
+    q.join(1, "A", 2)
+    q.join(2, "B", 3)
+    q.start()
+    q.finish(1, False)
+    q.join(3, "C")
+    assert order(q) == ["B", "C"] and q.find_user(3).place == 1
+    with pytest.raises(QueueError, match="не лишилось"):
+        q.join(4, "D")
+
+
+def test_done_out_of_order_does_not_close_places(make):
+    q = make(places=30)
+    q.join(1, "A", 1)
+    q.join(2, "B", 20)
+    q.start()
+    q.finish(ADMIN, True, 20)
+    assert q.join(3, "C", 5).place == 5
+
+
+def test_later_swaps_places(make):
+    q = make(places=30)
+    q.join(1, "A", 5)
+    q.join(2, "B", 9)
+    q.later(1)
+    assert (order(q), places(q)) == (["B", "A"], [5, 9])
+
+
+def test_join_after_returned_person(make):
+    q = make(places=30)
+    for uid, place in ((1, 1), (2, 2), (3, 8)):
+        q.join(uid, f"U{uid}", place)
+    q.start()
+    q.skip()
+    q.here(1)  # U2 | U3(8) U1(1)
+    q.join(4, "U4", 5)
+    q.join(5, "U5", 10)
+    assert order(q) == ["U2", "U4", "U3", "U1", "U5"]

@@ -1,7 +1,8 @@
 """Чиста логіка черги — без Telegram і без бази даних.
 
 Головне правило: `slots` — це список людей у порядку виклику, а «наступний» —
-перший у списку зі статусом WAITING. Часу в черзі немає, є тільки порядок.
+перший у списку зі статусом WAITING. У кожного є місце (1–30); порожніх місць
+у списку просто немає, тому вони пропускаються самі.
 Після кожної дії викликається `_advance()`, яка за потреби кличе наступного
 або оголошує перерву.
 """
@@ -12,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+DEFAULT_PLACES = 30  # скільки місць у черзі, якщо не вказано інше
 MAX_PEOPLE = 50  # щоб закріплене повідомлення влізло в ліміт Telegram (4096 символів)
 DEFAULT_WAIT_MINUTES = 3  # скільки чекати на «🏃 Йду» до автопропуску
 ENTER_GRACE_SECONDS = 60  # через скільки після виклику наступний може натиснути «Заходжу»
@@ -59,6 +61,7 @@ class Slot:
 
     user_id: int | None = None  # None — людина без Telegram (додана адміном)
     name: str = ""
+    place: int = 0  # яке місце людина зайняла
     status: SlotStatus = SlotStatus.WAITING
     skips: int = 0  # скільки разів людину вже пропускали
     called_at: float | None = None  # коли покликали
@@ -100,6 +103,7 @@ class Queue:
     slots: list[Slot] = field(default_factory=list)
     status: QueueStatus = QueueStatus.OPEN
     wait_minutes: int = DEFAULT_WAIT_MINUTES  # 0 — автопропуск вимкнено
+    places: int = DEFAULT_PLACES  # скільки всього місць
     break_every: int = 0  # після скількох здач перерва (0 — без перерв)
     turns: int = 0  # скільки здач було після останньої перерви
     on_break: bool = False  # перерва: нікого не кличемо, доки не натиснуть «Готово»
@@ -132,11 +136,32 @@ class Queue:
     def find_user(self, user_id: int) -> Slot | None:
         return next((s for s in self.slots if s.user_id == user_id), None)
 
-    def find_number(self, number: int) -> Slot:
-        """Людина за номером у списку (як у закріпленому повідомленні)."""
-        if not 1 <= number <= len(self.slots):
-            raise QueueError(f"Номера {number} немає в черзі.")
-        return self.slots[number - 1]
+    def find_place(self, place: int) -> Slot:
+        slot = next((s for s in self.slots if s.place == place), None)
+        if slot is None:
+            raise QueueError(f"На місці {place} нікого немає.")
+        return slot
+
+    @property
+    def free_places(self) -> list[int]:
+        taken = {s.place for s in self.slots}
+        return [p for p in range(1, self.places + 1) if p not in taken]
+
+    @property
+    def reached(self) -> int:
+        """Найдальше місце, до якого черга вже дійшла (0 — ще не запущена)."""
+        if self.status is QueueStatus.OPEN:
+            return 0
+        return max(
+            (
+                s.place
+                for s in self.slots
+                if s.status in (SlotStatus.CURRENT, SlotStatus.SKIPPED)
+                # called_at немає, якщо людину відмітили поза чергою
+                or (s.status is SlotStatus.DONE and s.called_at is not None)
+            ),
+            default=0,
+        )
 
     def people_ahead(self, slot: Slot) -> int:
         """Скільки людей (поточний + ті, хто чекає) стоїть перед цією людиною."""
@@ -289,23 +314,62 @@ class Queue:
     # Дії студентів
     # ------------------------------------------------------------------
 
-    def _append(self, user_id: int | None, name: str) -> Slot:
-        if len(self.slots) >= MAX_PEOPLE:
-            raise QueueError(f"У черзі вже {MAX_PEOPLE} людей — більше не влізе.")
-        slot = Slot(user_id=user_id, name=name)
-        self.slots.append(slot)
+    def _insert(self, slot: Slot) -> None:
+        """Поставити людину в список відповідно до її місця."""
+        after = next((s for s in self.waiting if s.place > slot.place), None)
+        if after is None:
+            self.slots.append(slot)
+        else:
+            self.slots.insert(self._index(after), slot)
+
+    def _check_place(self, place: int) -> None:
+        if not 1 <= place <= self.places:
+            raise QueueError(f"Місця — від 1 до {self.places}.")
+        if place not in self.free_places:
+            raise QueueError(f"Місце {place} вже зайняте ({self.find_place(place).name}).")
+        if place <= self.reached:
+            raise QueueError(f"Місце {place} вже минуло — обери більше за {self.reached}.")
+
+    def _place_new(self, user_id: int | None, name: str, place: int | None) -> Slot:
+        if place is not None:
+            self._check_place(place)
+        else:
+            free = self.free_places
+            if not free:
+                raise QueueError("Вільних місць не лишилось 😔")
+            place = next((p for p in free if p > self.reached), None)
+        if place is not None:
+            slot = Slot(user_id=user_id, name=name, place=place)
+            self._insert(slot)
+        else:
+            # Попереду місць немає, але є прогалини, які черга вже минула:
+            # беремо таку, а стаємо все одно в кінець.
+            slot = Slot(user_id=user_id, name=name, place=free[0])
+            self.slots.append(slot)
         self._advance()
         return slot
 
-    def join(self, user_id: int, name: str) -> Slot:
-        """Стати в кінець черги."""
+    def join(self, user_id: int, name: str, place: int | None = None) -> Slot:
+        """Зайняти місце (без номера — найближче вільне) або пересісти на інше."""
         self._ensure_not_closed()
-        existing = self.find_user(user_id)
-        if existing is not None:
-            if existing.status is SlotStatus.DONE:
-                raise QueueError("Твою здачу вже відмічено ✅")
-            raise QueueError(f"Ти вже в черзі, номер {self._index(existing) + 1}.")
-        return self._append(user_id, name)
+        mine = self.find_user(user_id)
+        if mine is None:
+            return self._place_new(user_id, name, place)
+        if self.can_return(mine):
+            raise QueueError("Тебе пропустили — щоб повернутися, натисни «🙋 Я тут» або /here.")
+        if mine.status is SlotStatus.DONE:
+            raise QueueError("Твою здачу вже відмічено ✅")
+        if place is None or place == mine.place:
+            raise QueueError(f"Ти вже в черзі, місце {mine.place}.")
+        if mine.status is SlotStatus.CURRENT:
+            raise QueueError("Зараз твоя черга — щоб пропустити інших, натисни «⏬ Пізніше».")
+        if mine.skips:  # інакше можна було б обійти штраф
+            raise QueueError("Після пропуску пересісти не можна — дочекайся своєї черги.")
+        self._check_place(place)
+        self._take_out(mine)
+        mine.place = place
+        self._insert(mine)
+        return mine
 
     def sign_up(self, user_id: int, name: str) -> tuple[bool, Slot]:
         """Кнопка «✋»: записатися, а якщо тебе пропустили — повернутися.
@@ -349,6 +413,7 @@ class Queue:
             raise QueueError("Після тебе нікого немає — ти і так у кінці черги.")
         self._take_out(mine)
         self.slots.insert(self._index(other) + 1, mine)
+        mine.place, other.place = other.place, mine.place
         if was_current:
             mine.back_to_waiting()
             other.call()
@@ -438,15 +503,15 @@ class Queue:
         slot.called_at = None
         self._last_skipped = slot
 
-    def finish(self, user_id: int, is_admin: bool, number: int | None = None) -> Slot | None:
-        """Позначити здачу (поточного або за номером), а під час перерви — закінчити її."""
+    def finish(self, user_id: int, is_admin: bool, place: int | None = None) -> Slot | None:
+        """Позначити здачу (поточного або за місцем), а під час перерви — закінчити її."""
         self._ensure_not_closed()
-        if number is not None:
+        if place is not None:
             if not is_admin:
-                raise QueueError("Відмічати за номером може тільки адмін.")
-            slot = self.find_number(number)
+                raise QueueError("Відмічати за місцем може тільки адмін.")
+            slot = self.find_place(place)
             if slot.status is SlotStatus.DONE:
-                raise QueueError(f"Номер {number} вже відмічено ✅")
+                raise QueueError(f"Місце {place} вже відмічено ✅")
         else:
             slot = self.current
             if slot is None and self.on_break:
@@ -495,14 +560,14 @@ class Queue:
         self._ensure_not_closed()
         self.break_every = every
 
-    def add(self, name: str) -> Slot:
-        """Дописати в кінець людину без Telegram."""
+    def add(self, name: str, place: int | None = None) -> Slot:
+        """Вписати людину без Telegram."""
         self._ensure_not_closed()
-        return self._append(None, name)
+        return self._place_new(None, name, place)
 
-    def remove(self, number: int) -> Slot:
+    def remove(self, place: int) -> Slot:
         self._ensure_not_closed()
-        slot = self.find_number(number)
+        slot = self.find_place(place)
         self._take_out(slot)
         self._advance()
         return slot

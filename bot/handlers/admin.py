@@ -28,6 +28,7 @@ async def cmd_new(message: Message, command: CommandObject, service: QueueServic
         thread_id=thread_id,
         title=args.title,
         wait_minutes=args.wait,
+        places=args.places,
         break_every=args.break_every,
     )
     await service.create(queue, created_by=message.from_user.id if message.from_user else 0)
@@ -75,9 +76,11 @@ async def cmd_breaks(message: Message, command: CommandObject, service: QueueSer
 async def cmd_add(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
     if not command.args:
-        raise QueueError("Формат: /add Прізвище Ім'я")
-    name = clean_name(command.args)
-    await service.apply(key_of(message), lambda q: q.add(name))
+        raise QueueError("Формат: /add Прізвище Ім'я або /add 10 Прізвище Ім'я")
+    first, _, rest = command.args.partition(" ")
+    place = parse_number(first) if first.isdigit() else None
+    name = clean_name(command.args if place is None else rest)
+    await service.apply(key_of(message), lambda q: q.add(name, place))
     await ok(message)
 
 
@@ -85,7 +88,7 @@ async def cmd_add(message: Message, command: CommandObject, service: QueueServic
 async def cmd_remove(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
     if not command.args:
-        raise QueueError("Формат: /remove 3 (номер зі списку)")
+        raise QueueError("Формат: /remove 3 (місце)")
     number = parse_number(command.args)
     await service.apply(key_of(message), lambda q: q.remove(number))
     await ok(message)

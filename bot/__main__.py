@@ -21,7 +21,7 @@ from bot.service import QueueService
 from bot.storage import Storage
 
 GROUP_COMMANDS = [
-    BotCommand(command="join", description="Записатися в кінець черги"),
+    BotCommand(command="join", description="Записатися (можна на місце: /join 10)"),
     BotCommand(command="done", description="Здано — кличте наступного"),
     BotCommand(command="leave", description="Виписатися"),
     BotCommand(command="later", description="Пропустити вперед наступного"),

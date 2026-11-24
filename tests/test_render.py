@@ -19,7 +19,7 @@ def buttons(kb) -> list[str]:
 
 def test_render_queue(make):
     q = make(4)
-    assert "у черзі 4" in render_queue(q)
+    assert "зайнято 4 з 50" in render_queue(q)
     q.start()
     q.finish(1, False)
     q.skip()
@@ -70,7 +70,10 @@ def test_mention():
 
 def test_keyboard_and_callback_roundtrip(make):
     q = make(1)
-    assert buttons(queue_keyboard(q)) == ["join", "where", "leave"]
+    open_buttons = buttons(queue_keyboard(make(1, places=3)))
+    assert open_buttons == ["p2", "p3", "join", "where", "leave"]  # 1 зайняте
+    assert parse_callback("q:p15:7") == ("p15", 7)
+    assert parse_callback("q:px:7") is None
     q.start()
     assert buttons(queue_keyboard(q)) == [
         "join", "where", "coming", "done", "later", "enter", "leave",
@@ -121,7 +124,7 @@ def test_position(make, clock):
     assert "Перед тобою 3 людини. Черга ще не почалась" in render_position(q, 4)
     q.start()
     assert render_position(q, 1) == "Зараз твоя черга! Натисни «🏃 Йду»."
-    assert render_position(q, 6) == "Перед тобою 5 людей, орієнтовно ~25 хв."
+    assert render_position(q, 6) == "Твоє місце — 6. Перед тобою 5 людей, орієнтовно ~25 хв."
     q.skip()
     assert "ще 1 людина" in render_position(q, 1)
     assert all(len(render_position(q, uid)) <= 200 for uid in range(1, 8))

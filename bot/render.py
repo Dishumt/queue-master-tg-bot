@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import math
+import re
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -65,7 +66,8 @@ def people(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _slot_line(number: int, slot: Slot, ready: Slot | None) -> str:
+def _slot_line(slot: Slot, ready: Slot | None) -> str:
+    number = slot.place
     name = escape(slot.name)
     returned = " ↩️" if slot.skips else ""  # повернувся після пропуску
     match slot.status:
@@ -89,7 +91,7 @@ def render_queue(queue: Queue) -> str:
 
     match queue.status:
         case QueueStatus.OPEN:
-            status = f"📝 Запис відкрито · у черзі {total}"
+            status = f"📝 Запис відкрито · зайнято {total} з {queue.places} місць"
         case QueueStatus.RUNNING if queue.on_break:
             status = f"☕ Перерва · здали {done} з {total}"
         case QueueStatus.RUNNING:
@@ -102,8 +104,8 @@ def render_queue(queue: Queue) -> str:
     ready = queue.upcoming if queue.status is QueueStatus.RUNNING else None
     last_waiting = queue.waiting[-1] if queue.waiting else None
     turns = queue.turns
-    for number, slot in enumerate(queue.slots, start=1):
-        lines.append(_slot_line(number, slot, ready))
+    for slot in queue.slots:
+        lines.append(_slot_line(slot, ready))
         if slot.status in (SlotStatus.CURRENT, SlotStatus.WAITING):
             turns += 1
             # Лінія там, де буде перерва (після останнього її не буває).
@@ -118,9 +120,14 @@ def render_queue(queue: Queue) -> str:
             if queue.wait_minutes
             else ""
         )
+        pick = (
+            "Обери місце кнопкою з номером. Порожні місця пропускаються."
+            if queue.status is QueueStatus.OPEN
+            else "Записатися на місце: /join 10. Порожні місця пропускаються."
+        )
         lines += [
             "",
-            f"<i>{wait}"
+            f"<i>{pick}\n{wait}"
             f"Після здачі — «{BTN_DONE}». Попередня людина вийшла, а ти під дверима — «{BTN_ENTER}».</i>",
         ]
     return "\n".join(lines)
@@ -140,7 +147,12 @@ def _turn_rows(queue: Queue) -> list[list[InlineKeyboardButton]]:
 def queue_keyboard(queue: Queue) -> InlineKeyboardMarkup | None:
     if queue.status is QueueStatus.CLOSED:
         return None
-    rows = [[_btn(queue, BTN_JOIN, "join"), _btn(queue, BTN_WHERE, "where")]]
+    rows = []
+    if queue.status is QueueStatus.OPEN:
+        # Кнопки з вільними місцями, по 6 у рядку.
+        free = [_btn(queue, str(p), f"p{p}") for p in queue.free_places]
+        rows += [free[i : i + 6] for i in range(0, len(free), 6)]
+    rows += [[_btn(queue, BTN_JOIN, "join"), _btn(queue, BTN_WHERE, "where")]]
     if queue.status is QueueStatus.RUNNING:
         rows += _turn_rows(queue)
     # «Виписатися» окремо внизу — щоб не натиснути випадково замість «Записатися».
@@ -240,15 +252,17 @@ def render_position(queue: Queue, user_id: int) -> str:
 
     ahead = queue.people_ahead(slot)
     if queue.status is QueueStatus.OPEN:
-        return f"Перед тобою {people(ahead)}. Черга ще не почалась."
+        return f"Твоє місце — {slot.place}. Перед тобою {people(ahead)}. Черга ще не почалась."
     minutes = math.ceil(queue.wait_seconds(slot) / 60)
-    return f"Перед тобою {people(ahead)}, орієнтовно ~{minutes} хв."
+    return f"Твоє місце — {slot.place}. Перед тобою {people(ahead)}, орієнтовно ~{minutes} хв."
 
 
 def parse_callback(data: str | None) -> tuple[str, int] | None:
     """'q:join:12' -> ('join', 12). Чужі або биті дані -> None."""
     parts = (data or "").split(":")
-    if len(parts) != 3 or parts[0] != CB_PREFIX or parts[1] not in ACTIONS:
+    if len(parts) != 3 or parts[0] != CB_PREFIX:
+        return None
+    if parts[1] not in ACTIONS and not re.fullmatch(r"p[0-9]{1,2}", parts[1]):
         return None
     try:
         return parts[1], int(parts[2])

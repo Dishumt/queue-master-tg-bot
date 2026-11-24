@@ -264,7 +264,7 @@ async def test_no_show_and_forgotten_done_flow(env, monkeypatch):
 
     # «Де я?» — спливаюче лише для Олени.
     await press(OLENA, "where")
-    assert last_answer(env.session).text == "Перед тобою 1 людина, орієнтовно ~5 хв."
+    assert last_answer(env.session).text == "Твоє місце — 1. Перед тобою 1 людина, орієнтовно ~5 хв."
 
     # Марта здає довго — бот нагадує (не раніше ніж через 10 хв).
     clock["t"] += 600
@@ -310,7 +310,12 @@ async def test_break_and_numbers_flow(env, monkeypatch):
     await env.send(ADMIN, "/add Зайвий")
     await env.send(ADMIN, "/remove 3")
     assert [s.name for s in queue.slots] == ["Олена", "Без Телеграму"]
-    await env.send(ANDRII, "/join")
+    await env.press(ANDRII, f"q:p15:{queue.id}", queue.message_id)
+    assert "Твоє місце — 15" in last_answer(env.session).text
+    await env.send(ANDRII, "/join 10")
+    assert queue.find_user(ANDRII.id).place == 10
+    await env.send(ADMIN, "/add 20 Останній")
+    await env.send(ADMIN, "/remove 20")
     await env.send(ADMIN, "/go")
 
     await env.send(OLENA, "/done")
