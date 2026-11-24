@@ -30,6 +30,26 @@ def test_screenshot_like_schedule():
     assert times[-1] == "13:00"
 
 
+def test_break_every_n_slots():
+    args = parse_new_args("X 10:00-11:00 5 перерва кожні 3 по 10")
+    assert args.slot_times() == [
+        "10:00", "10:05", "10:10", "10:25", "10:30", "10:35", "10:50", "10:55",
+    ]  # fmt: skip
+    same = parse_new_args("X 10:00-11:00 5 перерва кожні 3 учасників по 10 хв чекати 2")
+    assert same.slot_times() == args.slot_times() and same.wait == 2
+
+
+def test_break_every_combined_with_fixed():
+    # Після обіду (фіксованої перерви) лік слотів починається заново.
+    args = parse_new_args("X 10:00-11:00 5 перерва кожні 3 по 10 10:10-10:30")
+    assert args.slot_times() == ["10:00", "10:05", "10:30", "10:35", "10:40", "10:55"]
+    assert parse_new_args("X 10:00-11:00 5 перерва 10:10-10:30 перерва кожні 3 по 10").slot_times() == args.slot_times()
+
+
+def test_slots_resume_right_after_break():
+    assert parse_new_args("X 10:00-10:30 10 перерва 10:10-10:15").slot_times() == ["10:00", "10:15", "10:25"]
+
+
 def test_wait():
     assert parse_new_args("X 10:00-11:00").wait == 3
     args = parse_new_args("X 10:00-11:00 10 чекати 5 перерва 10:20-10:40")
@@ -48,6 +68,9 @@ def test_wait():
         ("X 10:00-11:00 0", "від 1 до 180"),
         ("X 10:00-10:05 перерва 10:00-10:05", "0 слотів"),
         ("X 08:00-20:00 5", str(MAX_SLOTS)),
+        ("X 10:00-11:00 перерва кожні 3", "два числа"),
+        ("X 10:00-11:00 перерва кожні 3 чекати 2", "Не зрозумів"),
+        ("X 10:00-11:00 перерва кожні 0 по 10", "від 1 до 60"),
         ("X 10:00-11:00 чекати", "кількість хвилин"),
         ("X 10:00-11:00 чекати 99", "від 0 до 60"),
     ],

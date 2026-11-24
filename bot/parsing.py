@@ -5,6 +5,7 @@
   - «10:25-13:00»  — слоти від 10:25 до 13:00 (13:00 не включно)
   - «5»            — крок у хвилинах (за замовчуванням 5)
   - «перерва ...»  — один чи кілька проміжків без слотів (кінець не включно)
+  - «перерва кожні 5 по 10» — після кожних 5 слотів перерва 10 хв
   - «чекати 3»     — скільки хвилин чекати на «🏃 Йду» (0 — без автопропуску)
 """
 
@@ -25,6 +26,9 @@ _RANGE_RE = re.compile(rf"^({_TIME})-({_TIME})$")
 _STEP_RE = re.compile(r"^(\d{1,3})(?:хв|хвилин|m|min)?$", re.IGNORECASE)
 _DASHES_RE = re.compile(rf"({_TIME})\s*[-–—]\s*({_TIME})")
 _BREAK_WORDS = {"перерва", "перерви", "break", "breaks"}
+_EVERY_WORDS = {"кожні", "кожних", "кожен", "через", "every"}
+# Слова, які можна вставити для зручності: «кожні 5 учасників по 10 хв».
+_FILLERS = {"по", "на", "учасників", "учасники", "людей", "людини", "студентів", "студенти", "хв", "хвилин"}
 _WAIT_WORDS = {"чекати", "очікування", "wait"}
 
 
@@ -64,14 +68,24 @@ class NewQueueArgs:
     step: int = DEFAULT_STEP
     breaks: list[tuple[int, int]] = field(default_factory=list)
     wait: int = DEFAULT_WAIT_MINUTES
+    every: tuple[int, int] | None = None  # (після скількох слотів, скільки хвилин)
 
     def slot_times(self) -> list[str]:
         times = []
         t = self.start
+        in_row = 0  # скільки слотів поспіль без перерви
         while t < self.end:
-            if not any(b_start <= t < b_end for b_start, b_end in self.breaks):
+            break_end = next((e for b, e in self.breaks if b <= t < e), None)
+            if break_end is not None:
+                t = break_end  # після перерви слоти йдуть одразу з її кінця
+                in_row = 0
+            elif self.every is not None and in_row == self.every[0]:
+                t += self.every[1]
+                in_row = 0
+            else:
                 times.append(fmt_time(t))
-            t += self.step
+                t += self.step
+                in_row += 1
         if not times:
             raise QueueError("Вийшло 0 слотів — перевір проміжок і перерви.")
         if len(times) > MAX_SLOTS:
@@ -96,7 +110,8 @@ NEW_USAGE = (
     "Формат: <code>/new Назва 10:25-13:00 5 перерва 12:00-12:20</code>\n"
     "• проміжок — коли приймають (кінець не включно)\n"
     "• число — крок у хвилинах (необов'язково, за замовчуванням 5)\n"
-    "• перерва — проміжки без слотів (необов'язково)\n"
+    "• перерва — один чи кілька проміжків: перерва 11:00-11:10 12:00-12:20\n"
+    "• або регулярна: перерва кожні 5 по 10 (після кожних 5 слотів — 10 хв)\n"
     f"• чекати N — скільки хвилин чекати на «🏃 Йду», потім автопропуск "
     f"(за замовчуванням {DEFAULT_WAIT_MINUTES}, 0 — вимкнути)"
 )
@@ -119,14 +134,23 @@ def parse_new_args(text: str) -> NewQueueArgs:
     # Невеликий автомат: mode — що ми зараз читаємо.
     #   step   — одразу після проміжку може йти крок
     #   breaks — після слова «перерва» йдуть проміжки
+    #   every  — після слова «кожні» йдуть два числа: скільки слотів і скільки хвилин
     #   wait   — після слова «чекати» йде одне число
     mode = "step"
     step_set = False
+    every: list[int] = []
     for token in tokens[range_at + 1 :]:
         word = token.lower()
         if word in _BREAK_WORDS:
             mode = "breaks"
-        elif word in _WAIT_WORDS:
+        elif word in _EVERY_WORDS and args.every is None and not every:
+            mode = "every"
+        elif mode == "every" and (m := _STEP_RE.match(token)):
+            every.append(int(m.group(1)))
+            if len(every) == 2:
+                args.every = _check_every(*every)
+                mode = "breaks"  # далі можуть іти ще й звичайні проміжки
+        elif word in _WAIT_WORDS and mode != "every":
             mode = "wait"
         elif mode == "breaks" and (rng := _parse_range(token)):
             args.breaks.append(rng)
@@ -138,11 +162,21 @@ def parse_new_args(text: str) -> NewQueueArgs:
             if not 1 <= args.step <= 180:
                 raise QueueError("Крок має бути від 1 до 180 хвилин.")
             step_set = True
+        elif word in _FILLERS and (every or args.every):
+            continue
         else:
             raise QueueError(f"Не зрозумів «{token}».\n\n" + NEW_USAGE)
+    if mode == "every":
+        raise QueueError("Після «кожні» вкажи два числа, наприклад: перерва кожні 5 по 10")
     if mode == "wait":
         raise QueueError("Після «чекати» вкажи кількість хвилин, наприклад: чекати 3")
     return args
+
+
+def _check_every(slots: int, minutes: int) -> tuple[int, int]:
+    if not 1 <= slots <= MAX_SLOTS or not 1 <= minutes <= 180:
+        raise QueueError("Перерва: від 1 до 60 слотів і від 1 до 180 хвилин.")
+    return slots, minutes
 
 
 def parse_wait(text: str) -> int:
