@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import itertools
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot, Dispatcher
@@ -29,7 +28,7 @@ from aiogram.methods import (
 from aiogram.types import CallbackQuery, Chat, ChatMemberOwner, Message, Update, User
 
 from bot.handlers import build_router
-from bot.queue_logic import SlotStatus, slot_moment
+from bot.queue_logic import SlotStatus
 from bot.permissions import AdminCache
 from bot.service import QueueService
 from bot.storage import Storage
@@ -41,7 +40,6 @@ OLENA = User(id=2, is_bot=False, first_name="Олена")
 ANDRII = User(id=3, is_bot=False, first_name="Андрій")
 BOT_USER = User(id=BOT_ID, is_bot=True, first_name="Queue", username="queue_bot")
 CHAT = Chat(id=CHAT_ID, type="supergroup", title="КН-21")
-LAB_DAY = datetime(2026, 11, 20, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv")).timestamp()
 
 # Роутери aiogram можна підключити лише один раз, тому Dispatcher спільний,
 # а сервіс і сховище в нього підставляються свіжі для кожного тесту.
@@ -140,20 +138,20 @@ def last_answer(session: FakeSession) -> AnswerCallbackQuery:
 
 async def test_full_lab_session(env):
     # Студент не може створити чергу.
-    await env.send(OLENA, "/new Лаба 3 10:25-10:40")
+    await env.send(OLENA, "/new Лаба 3")
     assert "для адмінів" in env.session.texts()[-1]
 
     # Адмін створює — бот публікує й закріплює повідомлення черги.
-    await env.send(ADMIN, "/new Лаба 3 10:25-10:40")
+    await env.send(ADMIN, "/new Лаба 3")
     queue = env.storage.get((CHAT_ID, 0))
     assert queue is not None and queue.message_id is not None
     assert "Лаба 3" in env.session.texts()[-1]
     assert env.session.sent(PinChatMessage)
 
-    # Олена записується кнопкою, Андрій — командою на конкретний час.
+    # Олена записується кнопкою, Андрій — командою.
     await env.press(OLENA, f"q:join:{queue.id}", queue.message_id)
-    assert "10:25" in last_answer(env.session).text
-    await env.send(ANDRII, "/join 10:35")
+    assert "Перед тобою 0 людей" in last_answer(env.session).text
+    await env.send(ANDRII, "/join")
     assert env.session.sent(SetMessageReaction)  # 👍 на команду
     assert env.session.sent(EditMessageText)  # закріплене повідомлення оновилось
 
@@ -197,15 +195,15 @@ async def test_full_lab_session(env):
 async def test_errors_are_shown_to_user(env):
     await env.send(OLENA, "/join")
     assert "немає активної черги" in env.session.texts()[-1]
+    await env.send(ADMIN, "/new Лаба 10:00-11:00")
+    assert "Час більше не потрібен" in env.session.texts()[-1]
     await env.send(ADMIN, "/new Лаба")
-    assert "проміжку" in env.session.texts()[-1]
-    await env.send(ADMIN, "/new Лаба 10:00-10:10")
-    await env.send(ADMIN, "/new Ще одна 10:00-10:10")
+    await env.send(ADMIN, "/new Ще одна")
     assert "уже є активна черга" in env.session.texts()[-1]
 
 
 async def test_name_command_renames_in_queue(env):
-    await env.send(ADMIN, "/new Лаба 10:00-10:10")
+    await env.send(ADMIN, "/new Лаба")
     await env.send(OLENA, "/join")
     await env.send(OLENA, "/name Коваленко Олена")
     queue = env.storage.get((CHAT_ID, 0))
@@ -222,17 +220,17 @@ async def run_due_timer(env) -> None:
 
 
 async def test_no_show_and_forgotten_done_flow(env, monkeypatch):
-    clock = {"t": slot_moment("10:00", LAB_DAY)}
+    clock = {"t": 1000.0}
     monkeypatch.setattr("bot.queue_logic.now", lambda: clock["t"])
     marta = User(id=4, is_bot=False, first_name="Марта")
 
-    await env.send(ADMIN, "/new Лаба 10:00-10:30 чекати 2")
+    await env.send(ADMIN, "/new Лаба чекати 2")
     queue = env.storage.get((CHAT_ID, 0))
     assert queue.wait_minutes == 2
-    for user in (OLENA, ANDRII, marta):  # 10:00, 10:05, 10:10
+    for user in (OLENA, ANDRII, marta):
         await env.send(user, "/join")
     await env.send(ADMIN, "/go")
-    assert "до 10:02" in env.session.texts()[-1]
+    assert "протягом 2 хв" in env.session.texts()[-1]
 
     def press(user, action):
         return env.press(user, f"q:{action}:{queue.id}", queue.message_id)
@@ -287,7 +285,7 @@ async def test_no_show_and_forgotten_done_flow(env, monkeypatch):
 
 
 async def test_leave_needs_double_press_and_errors_disappear(env):
-    await env.send(ADMIN, "/new Лаба 10:00-10:10")
+    await env.send(ADMIN, "/new Лаба")
     queue = env.storage.get((CHAT_ID, 0))
     await env.press(OLENA, f"q:join:{queue.id}", queue.message_id)
     await env.press(OLENA, f"q:leave:{queue.id}", queue.message_id)
@@ -300,3 +298,29 @@ async def test_leave_needs_double_press_and_errors_disappear(env):
     await env.send(OLENA, "/leave")
     assert "немає в цій черзі" in env.session.texts()[-1]
     assert env.service._delayed
+
+
+async def test_break_and_numbers_flow(env, monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("bot.queue_logic.now", lambda: clock["t"])
+    await env.send(ADMIN, "/new Лаба перерва кожні 1 по 10")
+    queue = env.storage.get((CHAT_ID, 0))
+    await env.send(OLENA, "/join")
+    await env.send(ADMIN, "/add Без Телеграму")
+    await env.send(ADMIN, "/add Зайвий")
+    await env.send(ADMIN, "/remove 3")
+    assert [s.name for s in queue.slots] == ["Олена", "Без Телеграму"]
+    await env.send(ANDRII, "/join")
+    await env.send(ADMIN, "/go")
+
+    await env.send(OLENA, "/done")
+    assert "☕ Перерва 10 хв" in env.session.texts()[-1]
+    clock["t"] += 600
+    await run_due_timer(env)
+    assert "Без Телеграму</b>, твоя черга" in env.session.texts()[-1]
+
+    await env.send(ADMIN, "/done 2")
+    assert queue.on_break
+    await env.send(ADMIN, "/breaks 0")
+    await env.send(ADMIN, "/go")  # закінчити перерву раніше
+    assert queue.current.user_id == ANDRII.id

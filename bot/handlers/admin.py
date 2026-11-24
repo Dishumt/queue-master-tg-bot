@@ -7,9 +7,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from bot.handlers.helpers import key_of, ok, require_admin
-from bot.parsing import NEW_USAGE, clean_name, normalize_time, parse_new_args, parse_wait
+from bot.parsing import NEW_USAGE, clean_name, parse_break, parse_new_args, parse_number, parse_wait
 from bot.permissions import AdminCache
-from bot.queue_logic import Queue, QueueError, Slot
+from bot.queue_logic import Queue, QueueError
 from bot.service import QueueService
 
 router = Router(name="admin")
@@ -27,9 +27,9 @@ async def cmd_new(message: Message, command: CommandObject, service: QueueServic
         chat_id=chat_id,
         thread_id=thread_id,
         title=args.title,
-        step=args.step,
         wait_minutes=args.wait,
-        slots=[Slot(t) for t in args.slot_times()],
+        break_every=args.break_every,
+        break_minutes=args.break_minutes,
     )
     await service.create(queue, created_by=message.from_user.id if message.from_user else 0)
 
@@ -62,14 +62,23 @@ async def cmd_wait(message: Message, command: CommandObject, service: QueueServi
     await ok(message)
 
 
+@router.message(Command("breaks"))
+async def cmd_breaks(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
+    await require_admin(message, admins)
+    if not command.args:
+        raise QueueError("Формат: /breaks 5 10 — після кожних 5 здач 10 хв (0 — без перерв)")
+    every, minutes = parse_break(command.args)
+    await service.apply(key_of(message), lambda q: q.set_breaks(every, minutes))
+    await ok(message)
+
+
 @router.message(Command("add"))
 async def cmd_add(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
-    time, _, name = (command.args or "").partition(" ")
-    if not time or not name.strip():
-        raise QueueError("Формат: /add 10:45 Прізвище Ім'я")
-    time, name = normalize_time(time), clean_name(name)
-    await service.apply(key_of(message), lambda q: q.add(time, name))
+    if not command.args:
+        raise QueueError("Формат: /add Прізвище Ім'я")
+    name = clean_name(command.args)
+    await service.apply(key_of(message), lambda q: q.add(name))
     await ok(message)
 
 
@@ -77,9 +86,9 @@ async def cmd_add(message: Message, command: CommandObject, service: QueueServic
 async def cmd_remove(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     await require_admin(message, admins)
     if not command.args:
-        raise QueueError("Формат: /remove 10:45")
-    time = normalize_time(command.args)
-    await service.apply(key_of(message), lambda q: q.remove(time))
+        raise QueueError("Формат: /remove 3 (номер зі списку)")
+    number = parse_number(command.args)
+    await service.apply(key_of(message), lambda q: q.remove(number))
     await ok(message)
 
 

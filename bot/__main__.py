@@ -14,7 +14,6 @@ from aiogram.types import (
     LinkPreviewOptions,
 )
 
-from bot import queue_logic
 from bot.config import load_config
 from bot.handlers import build_router
 from bot.permissions import AdminCache
@@ -22,7 +21,7 @@ from bot.service import QueueService
 from bot.storage import Storage
 
 GROUP_COMMANDS = [
-    BotCommand(command="join", description="Записатися (можна з часом: /join 10:45)"),
+    BotCommand(command="join", description="Записатися в кінець черги"),
     BotCommand(command="done", description="Здано — кличте наступного"),
     BotCommand(command="leave", description="Виписатися"),
     BotCommand(command="later", description="Пропустити вперед наступного"),
@@ -31,9 +30,10 @@ GROUP_COMMANDS = [
     BotCommand(command="name", description="Як мене показувати в черзі"),
     BotCommand(command="help", description="Усі команди"),
     BotCommand(command="new", description="[адмін] Нова черга"),
-    BotCommand(command="go", description="[адмін] Почати приймати"),
+    BotCommand(command="go", description="[адмін] Почати приймати / закінчити перерву"),
     BotCommand(command="skip", description="[адмін] Поточний не прийшов"),
     BotCommand(command="wait", description="[адмін] Скільки хвилин чекати на «Йду»"),
+    BotCommand(command="breaks", description="[адмін] Перерви: /breaks 5 10"),
     BotCommand(command="repost", description="[адмін] Переслати чергу вниз"),
     BotCommand(command="close", description="[адмін] Закрити чергу"),
 ]
@@ -44,7 +44,6 @@ async def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     config = load_config()
-    queue_logic.set_timezone(config.timezone)
 
     bot = Bot(
         config.bot_token,

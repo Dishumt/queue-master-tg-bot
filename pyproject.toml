@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13,<4",
     "aiosqlite>=0.20",
-    "tzdata>=2024.1",
 ]
 
 [dependency-groups]

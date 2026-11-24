@@ -9,7 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message, User
 
 from bot.handlers.helpers import display_name, key_of, ok, require_admin
-from bot.parsing import normalize_time
+from bot.parsing import parse_number
 from bot.permissions import AdminCache
 from bot.queue_logic import Entered
 from bot.render import BTN_DONE, BTN_LEAVE, parse_callback, people, render_position
@@ -29,7 +29,6 @@ ENTER_ANSWERS = {
     Entered.CONFIRMED: "🏃 Чекаємо! Після здачі натисни «{done}».",
     Entered.CLOSED: "🚪 Успіхів! Попередньому поставлено «{done}».",
     Entered.SKIPPED: "🚪 Успіхів! Попередній не прийшов — його пропущено.",
-    Entered.DEFERRED: "🚪 Успіхів! Попереднього покликали зарано — піде після тебе, без штрафу.",
 }
 
 
@@ -75,7 +74,7 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
                 ahead = service.get(key, queue_id).people_ahead(slot)
                 await cb.answer(f"🙋 З поверненням! Перед тобою {people(ahead)}.")
             else:
-                await cb.answer(f"✋ Тебе записано на {slot.time}")
+                await cb.answer(f"✋ Тебе записано. Перед тобою {people(service.get(key, queue_id).people_ahead(slot))}.")
         case "here":
             slot = await service.apply(key, lambda q: q.here(user.id), queue_id)
             ahead = service.get(key, queue_id).people_ahead(slot)
@@ -84,8 +83,8 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
             if not service.confirm_leave(queue_id, user.id):
                 await cb.answer(f"Точно виписатися? Натисни «{BTN_LEAVE}» ще раз протягом 5 с.")
                 return
-            slot = await service.apply(key, lambda q: q.leave(user.id), queue_id)
-            await cb.answer(f"Слот {slot.time} звільнено")
+            await service.apply(key, lambda q: q.leave(user.id), queue_id)
+            await cb.answer("Тебе виписано з черги")
         case "where":
             await cb.answer(render_position(service.get(key, queue_id), user.id), show_alert=True)
         case "coming":
@@ -101,8 +100,8 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
             outcome = await _enter(service, admins, key, cb, user, queue_id)
             await cb.answer(ENTER_ANSWERS[outcome].format(done=BTN_DONE))
         case "later":
-            mine, _ = await service.apply(key, lambda q: q.later(user.id), queue_id)
-            await cb.answer(f"⏬ Тепер ти на {mine.time}")
+            mine = await service.apply(key, lambda q: q.later(user.id), queue_id)
+            await cb.answer(f"⏬ Тепер перед тобою {people(service.get(key, queue_id).people_ahead(mine))}.")
 
 
 # ---------------------------------------------------------------------------
@@ -111,14 +110,10 @@ async def on_button(cb: CallbackQuery, service: QueueService, admins: AdminCache
 
 
 @router.message(Command("join"))
-async def cmd_join(message: Message, command: CommandObject, service: QueueService):
+async def cmd_join(message: Message, service: QueueService):
     user = message.from_user
     name = display_name(service, user)
-    if command.args:
-        time = normalize_time(command.args)
-        await service.apply(key_of(message), lambda q: q.join(user.id, name, time))
-    else:  # як кнопка «✋»: записатися або повернутися після пропуску
-        await service.apply(key_of(message), lambda q: q.sign_up(user.id, name))
+    await service.apply(key_of(message), lambda q: q.sign_up(user.id, name))
     await ok(message)
 
 
@@ -147,10 +142,10 @@ async def cmd_here(message: Message, service: QueueService):
 async def cmd_done(message: Message, command: CommandObject, service: QueueService, admins: AdminCache):
     user = message.from_user
     key = key_of(message)
-    if command.args:  # /done 10:45 — адмін відмічає конкретний слот
+    if command.args:  # /done 3 — адмін відмічає людину за номером
         await require_admin(message, admins)
-        time = normalize_time(command.args)
-        await service.apply(key, lambda q: q.finish(user.id, True, time))
+        number = parse_number(command.args)
+        await service.apply(key, lambda q: q.finish(user.id, True, number))
     else:
         await _finish(service, admins, key, message, user)
     await ok(message)

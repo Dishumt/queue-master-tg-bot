@@ -14,7 +14,6 @@ from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.parsing import parse_time
 from bot.queue_logic import (
     RETURN_PENALTY,
     Queue,
@@ -22,7 +21,6 @@ from bot.queue_logic import (
     Slot,
     SlotStatus,
     TurnChange,
-    local_hhmm,
 )
 
 # Дані кнопок: "q:<дія>:<id черги>". id потрібен, щоб кнопки старого
@@ -67,54 +65,52 @@ def people(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _slot_line(slot: Slot, upcoming: Slot | None) -> str:
-    time = f"<code>{slot.time}</code>"
-    name = escape(slot.name or "")
+def _slot_line(number: int, slot: Slot, ready: Slot | None) -> str:
+    name = escape(slot.name)
     returned = " ↩️" if slot.skips else ""  # повернувся після пропуску
     match slot.status:
-        case SlotStatus.EMPTY:
-            return f"{time}  ·  —"
         case SlotStatus.DONE:
-            return f"{time} ✅ {name}"
+            return f"{number}. ✅ {name}"
         case SlotStatus.CURRENT if slot.confirmed or slot.user_id is None:
-            return f"{time} ▶️ <b>{name}</b>{returned}  ← здає"
+            return f"{number}. ▶️ <b>{name}</b>{returned}  ← здає"
         case SlotStatus.CURRENT:
-            return f"{time} 📣 <b>{name}</b>{returned}  ← кличемо…"
+            return f"{number}. 📣 <b>{name}</b>{returned}  ← кличемо…"
         case SlotStatus.SKIPPED:
-            return f"{time} ⏭ <s>{name}</s>  (пропущено)"
-        case SlotStatus.WAITING if slot is upcoming:
-            return f"{time} ⏳ {name}{returned}  ← готується"
+            return f"{number}. ⏭ <s>{name}</s>  (пропущено)"
+        case SlotStatus.WAITING if slot is ready:
+            return f"{number}. ⏳ {name}{returned}  ← готується"
         case _:
-            return f"{time} ▫️ {name}{returned}"
+            return f"{number}. ▫️ {name}{returned}"
 
 
 def render_queue(queue: Queue) -> str:
     done = sum(s.status is SlotStatus.DONE for s in queue.slots)
-    total = sum(not s.is_free for s in queue.slots)
+    total = len(queue.slots)
 
     match queue.status:
         case QueueStatus.OPEN:
-            status = f"📝 Запис відкрито · записалось {total}"
+            status = f"📝 Запис відкрито · у черзі {total}"
+        case QueueStatus.RUNNING if queue.on_break:
+            status = f"☕ Перерва · здали {done} з {total}"
         case QueueStatus.RUNNING:
             status = f"🟢 Приймають · здали {done} з {total}"
         case _:
             status = f"🔒 Черга закрита · здали {done} з {total}"
 
-    # «Готується» показуємо тільки коли хтось уже здає.
-    upcoming = queue.upcoming if queue.current else None
     lines = [f"📋 <b>{escape(queue.title)}</b>", status, ""]
-    # Слоти йдуть у порядку виклику, і той, хто повернувся, стоїть «не за часом».
-    # Тому перерви беремо з розкладу (відсортованих часів), а не з сусідніх
-    # рядків, і малюємо лінію, коли список «перетинає» перерву, рухаючись уперед.
-    schedule = sorted(parse_time(s.time) for s in queue.slots)
-    break_ends = [b for a, b in zip(schedule, schedule[1:]) if b - a > queue.step]
-    latest: int | None = None
-    for slot in queue.slots:
-        minutes = parse_time(slot.time)
-        if latest is not None and any(latest < end <= minutes for end in break_ends):
-            lines.append("<i>── перерва ──</i>")
-        latest = minutes if latest is None else max(latest, minutes)
-        lines.append(_slot_line(slot, upcoming))
+    # «Готується» показуємо тільки коли чергу запущено.
+    ready = queue.upcoming if queue.status is QueueStatus.RUNNING else None
+    last_waiting = queue.waiting[-1] if queue.waiting else None
+    turns = queue.turns
+    for number, slot in enumerate(queue.slots, start=1):
+        lines.append(_slot_line(number, slot, ready))
+        if slot.status in (SlotStatus.CURRENT, SlotStatus.WAITING):
+            turns += 1
+            # Лінія там, де буде перерва (після останнього її не буває).
+            if queue.break_every and turns >= queue.break_every and slot is not last_waiting:
+                if last_waiting is not None and queue.status is not QueueStatus.CLOSED:
+                    lines.append(f"<i>── ☕ перерва {queue.break_minutes} хв ──</i>")
+                turns = 0
 
     if queue.status is not QueueStatus.CLOSED:
         wait = (
@@ -125,8 +121,7 @@ def render_queue(queue: Queue) -> str:
         lines += [
             "",
             f"<i>{wait}"
-            f"Після здачі — «{BTN_DONE}». Попередні вже вийшли, а ти під дверима — «{BTN_ENTER}».\n"
-            "Записатися на конкретний час: /join 10:45</i>",
+            f"Після здачі — «{BTN_DONE}». Попередня людина вийшла, а ти під дверима — «{BTN_ENTER}».</i>",
         ]
     return "\n".join(lines)
 
@@ -171,11 +166,6 @@ def render_turn(queue: Queue, change: TurnChange) -> str | None:
             f"⏭ {mention(change.skipped)} не відгукується — пропускаю. "
             f"Прийдеш — натисни «{BTN_HERE}»."
         )
-    if change.deferred is not None:
-        lines.append(
-            f"⏩ {mention(change.deferred)}, тебе покликали раніше за розклад — "
-            "наступна людина зайшла першою, без штрафу. Далі ти."
-        )
 
     if change.changed:
         cur = change.current
@@ -184,13 +174,16 @@ def render_turn(queue: Queue, change: TurnChange) -> str | None:
                 lines.append(f"▶️ Зараз здає: {mention(cur)}")
             else:
                 lines.append(f"▶️ {mention(cur)}, твоя черга!")
-                deadline = queue.confirm_deadline
-                if deadline is not None:
+                if queue.confirm_deadline is not None:
                     lines.append(
-                        f"Натисни «{BTN_COMING}» до {local_hhmm(deadline)}, інакше пропущу."
+                        f"Натисни «{BTN_COMING}» протягом {queue.wait_minutes} хв, інакше пропущу."
                     )
-            if change.upcoming is not None and change.upcoming is not change.deferred:
+            if change.upcoming is not None:
                 lines.append(f"⏳ {mention(change.upcoming)}, готуйся — далі ти.")
+        elif queue.on_break:
+            lines.append(f"☕ Перерва {queue.break_minutes} хв.")
+            if change.upcoming is not None:
+                lines.append(f"⏳ {mention(change.upcoming)}, після перерви — ти.")
         elif queue.status is QueueStatus.RUNNING:
             lines.append("🎉 Більше нікого в черзі! Можна дописатися — бот покличе.")
 
@@ -244,8 +237,8 @@ def render_position(queue: Queue, user_id: int) -> str:
 
     ahead = queue.people_ahead(slot)
     if queue.status is QueueStatus.OPEN:
-        return f"Ти в черзі на {slot.time}. Перед тобою {people(ahead)}. Черга ще не почалась."
-    minutes = math.ceil(ahead * queue.avg_turn() / 60)
+        return f"Перед тобою {people(ahead)}. Черга ще не почалась."
+    minutes = math.ceil(queue.wait_seconds(slot) / 60)
     return f"Перед тобою {people(ahead)}, орієнтовно ~{minutes} хв."
 
 
